@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Connect Your Solana Wallet</title>
+  <script src="https://unpkg.com/@solana/wallet-adapter-wallets@0.19.13/lib/index.umd.js"></script>
+  <script src="https://unpkg.com/@solana/wallet-adapter-base@0.19.13/lib/index.umd.js"></script>
+  <script src="https://unpkg.com/@solana/wallet-adapter-react-ui@0.19.13/lib/index.umd.js"></script>
+  <script src="https://unpkg.com/@solana/web3.js@1.93.5/lib/index.iife.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background: #181c20; color: #fff; text-align: center; }
+    .container { margin-top: 60px; }
+    button { padding: 12px 24px; font-size: 18px; border-radius: 8px; border: none; background: #512da8; color: #fff; cursor: pointer; margin: 10px; }
+    .success { color: #4caf50; margin-top: 20px; }
+    .error { color: #f44336; margin-top: 20px; }
+    .address { font-family: monospace; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>ربط محفظتك مع بوت التداول</h2>
+    <div id="wallet-section">
+      <button id="connect-btn">🔗 Connect Wallet</button>
+      <div id="address"></div>
+    </div>
+    <div id="sign-section" style="display:none;">
+      <p>اضغط على الزر لتوقيع التفويض:</p>
+      <button id="sign-btn">✍️ Sign Authorization</button>
+    </div>
+    <div id="result"></div>
+  </div>
+  <script>
+    let wallet, publicKey;
+    const search = new URLSearchParams(window.location.search);
+    const userId = search.get('user');
+    const nonce = search.get('nonce');
+    const message = `Authorize connection to bot: ${nonce}`;
+
+    document.getElementById('connect-btn').onclick = async () => {
+      if (!window.solana) {
+        alert('يرجى تثبيت محفظة Phantom أو Solflare!');
+        return;
+      }
+      try {
+        await window.solana.connect();
+        publicKey = window.solana.publicKey.toString();
+        document.getElementById('address').innerHTML = '✅ Wallet: <span class="address">' + publicKey + '</span>';
+        document.getElementById('sign-section').style.display = '';
+      } catch (e) {
+        document.getElementById('result').innerHTML = '<div class="error">فشل الاتصال بالمحفظة</div>';
+      }
+    };
+
+    document.getElementById('sign-btn').onclick = async () => {
+      if (!window.solana || !publicKey) return;
+      try {
+        const encodedMessage = new TextEncoder().encode(message);
+        const signed = await window.solana.signMessage(encodedMessage, 'utf8');
+        // إرسال البيانات للبوت عبر API
+        const res = await fetch('/api/wallet-auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId, address: publicKey, message, signature: Array.from(signed.signature) })
+        });
+        if (res.ok) {
+          document.getElementById('result').innerHTML = '<div class="success">تم ربط المحفظة بنجاح! يمكنك العودة للبوت.</div>';
+        } else {
+          document.getElementById('result').innerHTML = '<div class="error">فشل الربط. حاول مرة أخرى.</div>';
+        }
+      } catch (e) {
+        document.getElementById('result').innerHTML = '<div class="error">فشل التوقيع</div>';
+      }
+    };
+  </script>
+</body>
+</html>
