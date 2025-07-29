@@ -56,35 +56,63 @@ function registerWsNotifications(bot: any, users: Record<string, any>) {
             const volume = token.volume ?? token.volume24h ?? token.amount;
             const logo = token.logoURI || token.logo || token.baseToken?.logoURI || undefined;
             const pairAddress = token.pairAddress || address;
+
             // روابط DexScreener
             const dexBase = process.env.DEXSCREENER_BASE_URL || 'https://dexscreener.com/solana';
             const dexUrl = `${dexBase}/${pairAddress}`;
-            // رابط دعوة البوت
-            const botUsername = process.env.BOT_USERNAME || 'YourBotUsername';
+
+
+            // جلب اسم البوت دائماً من كائن البوت إذا توفر (الأولوية)
+            let botUsername = (bot && bot.botInfo && bot.botInfo.username) ? bot.botInfo.username : (process.env.BOT_USERNAME || 'YourBotUsername');
+            // رابط مشاركة العملة مع البوت
             const inviteUrl = `https://t.me/${botUsername}?start=${address}`;
 
-            // تنسيق الأرقام
-            function fmt(val: number | string | undefined | null, digits = 2): string {
+
+            // تنسيق الأرقام مع وحدة العملة
+            function fmt(val: number | string | undefined | null, digits = 2, unit?: string): string {
               if (val === undefined || val === null) return '-';
-              if (typeof val === 'number') return val.toLocaleString(undefined, { maximumFractionDigits: digits });
-              if (!isNaN(Number(val))) return Number(val).toLocaleString(undefined, { maximumFractionDigits: digits });
-              return String(val);
+              let num = typeof val === 'number' ? val : Number(val);
+              if (isNaN(num)) return String(val);
+              let str = num.toLocaleString(undefined, { maximumFractionDigits: digits });
+              if (unit) str += ' ' + unit;
+              return str;
             }
 
-            let msg = `🚀 <b>Token Alert!</b>\n`;
-            if (logo) msg += `<a href='${dexUrl}'><img src='${logo}' width='32' height='32'/></a>\n`;
-            msg += `<b>Name:</b> ${name} (${symbol})\n`;
-            msg += `<b>Address:</b> <code>${address}</code>\n`;
-            if (priceUsd) msg += `<b>Price (USD):</b> $${fmt(priceUsd, 6)}\n`;
-            if (priceSol) msg += `<b>Price (SOL):</b> ${fmt(priceSol, 6)}\n`;
-            if (marketCap) msg += `<b>MarketCap:</b> $${fmt(marketCap)}\n`;
-            if (volume) msg += `<b>Volume (24h):</b> $${fmt(volume)}\n`;
+            // التأكد من أن marketCap وvolume بالدولار فقط
+            const marketCapUsd = (marketCap && (!token.marketCapUnit || token.marketCapUnit === 'USD')) ? marketCap : undefined;
+            const volumeUsd = (volume && (!token.volumeUnit || token.volumeUnit === 'USD')) ? volume : undefined;
+
+
+
+            let msg = `🚀 <b>${name} (${symbol})</b> ${verified === true || verified === 'true' ? '✅' : '❌'}\n`;
+            if (logo) msg += `<a href='${dexUrl}'><img src='${logo}' width='64' height='64'/></a>\n`;
+            if (priceUsd || priceSol) {
+              msg += `<b>Price:</b> `;
+              if (priceUsd) msg += `$${fmt(priceUsd, 6, 'USD')}`;
+              if (priceSol) msg += ` | <b>SOL:</b> ${fmt(priceSol, 6, 'SOL')}`;
+              msg += `\n`;
+            }
+            if (marketCapUsd) msg += `<b>MarketCap:</b> $${fmt(marketCapUsd, 2, 'USD')}\n`;
+            if (volumeUsd) msg += `<b>Volume (24h):</b> $${fmt(volumeUsd, 2, 'USD')}\n`;
             if (holders) msg += `<b>Holders:</b> ${fmt(holders, 0)}\n`;
             if (age) msg += `<b>Age:</b> ${fmt(age, 0)} min\n`;
-            msg += `<b>Verified:</b> ${verified === true || verified === 'true' ? '✅' : '❌'}\n`;
+            msg += `<b>Address:</b> <code>${address}</code>\n`;
             msg += `\n<a href='${dexUrl}'>View on DexScreener</a> | <a href='${inviteUrl}'>Share via Bot</a>`;
 
-            bot.telegram.sendMessage(uid, msg, { parse_mode: 'HTML', disable_web_page_preview: false });
+            // أزرار تفاعل مستقبلية (Buy/Watch/Ignore)
+            const inlineKeyboard = [
+              [
+                { text: '🟢 Buy', url: dexUrl },
+                { text: '👁️ Watch', url: dexUrl },
+                { text: '📈 View Chart', url: dexUrl }
+              ]
+            ];
+
+            bot.telegram.sendMessage(uid, msg, {
+              parse_mode: 'HTML',
+              disable_web_page_preview: false,
+              reply_markup: { inline_keyboard: inlineKeyboard }
+            });
           });
         }
       });
