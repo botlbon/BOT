@@ -2,24 +2,217 @@ import fs from 'fs';
 import { Markup, Telegraf } from 'telegraf';
 import type { Context } from 'telegraf';
 import type { Strategy } from './bot/types';
-import { getErrorMessage, limitHistory, hasWallet, walletKeyboard } from './bot/helpers';
+import { getErrorMessage, limitHistory, hasWallet, walletKeyboard, loadUsers, saveUsers } from './bot/helpers';
 import { filterTokensByStrategy } from './bot/strategy';
 import dotenv from 'dotenv';
+
 dotenv.config();
+
+
 import { loadKeypair, getConnection } from './wallet';
 import { parseSolanaPrivateKey, toBase64Key } from './keyFormat';
 import { unifiedBuy, unifiedSell } from './tradeSources';
 import { helpMessages } from './helpMessages';
-import { loadUsers, saveUsers } from './bot/helpers';
 import { monitorCopiedWallets } from './utils/portfolioCopyMonitor';
 
-// Telegram bot
+dotenv.config();
+
+
+
 export const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!);
 console.log('🚀 Telegram bot script loaded.');
 
+// Always reply to /start for any user (new or existing)
+bot.start(async (ctx: any) => {
+  const user = getOrRegisterUser(ctx);
+  await ctx.reply('👋 Welcome! You are now registered. Here is the main menu:', { parse_mode: 'HTML' });
+  await sendMainMenu(ctx);
+});
+
+
+
+
+
+// Helper: Register user if new, always returns the user object
+function getOrRegisterUser(ctx: any): any {
+  const userId = String(ctx.from?.id);
+  if (!users[userId]) {
+    users[userId] = {
+      id: userId,
+      username: ctx.from?.username || '',
+      firstName: ctx.from?.first_name || '',
+      registeredAt: Date.now(),
+      trades: 0,
+      activeTrades: 1,
+      history: [],
+      // Add more default fields as needed
+    };
+    saveUsers(users);
+    ctx.reply('👋 Welcome! You are now registered. Here is the main menu:', { parse_mode: 'HTML' });
+    sendMainMenu(ctx);
+  }
+  return users[userId];
+}
+
+
+
+// === Activity Button Handler ===
+bot.action('show_activity', async (ctx: any) => {
+  const user = getOrRegisterUser(ctx);
+  await ctx.answerCbQuery();
+  if (!Array.isArray(user.history) || user.history.length === 0) {
+    await ctx.reply('No activity found for your account.');
+    return;
+  }
+  const lastHistory = user.history.slice(-20).reverse();
+  const msg = [
+    '<b>Your recent activity:</b>',
+    ...lastHistory.map((entry: string) => `- ${entry}`)
+  ].join('\n');
+  await ctx.reply(msg, { parse_mode: 'HTML' });
+});
+
+// === Sell Button Handler ===
+bot.action('sell', async (ctx: any) => {
+  await ctx.answerCbQuery();
+  await ctx.reply('🛑 Sell feature is coming soon!');
+});
+
+// === Buy Button Handler ===
+bot.action('buy', async (ctx: any) => {
+  await ctx.answerCbQuery();
+  await ctx.reply('🟢 To buy a token, please select one from the token list or use /start to refresh the menu.');
+});
+
+
+// === Set Strategy Button Handler (Wizard) ===
+const STRATEGY_FIELDS = [
+  { key: 'minVolume', label: 'Minimum Volume (USD)', type: 'number', optional: true },
+  { key: 'minHolders', label: 'Minimum Holders', type: 'number', optional: true },
+  { key: 'minAge', label: 'Minimum Age (minutes)', type: 'number', optional: true },
+  { key: 'minMarketCap', label: 'Minimum MarketCap (USD)', type: 'number', optional: true },
+  { key: 'maxAge', label: 'Maximum Age (minutes)', type: 'number', optional: true },
+  { key: 'onlyVerified', label: 'Only Verified Tokens?', type: 'boolean', optional: true },
+  { key: 'fastListing', label: 'Fast Listing Only?', type: 'boolean', optional: true },
+  { key: 'enabled', label: 'Enable Strategy?', type: 'boolean', optional: false },
+];
+
+let strategyWizard: Record<string, { step: number, data: any }> = {};
+
+bot.action('set_strategy', async (ctx: any) => {
+  const userId = String(ctx.from?.id);
+  strategyWizard[userId] = { step: 0, data: { ...((users[userId] && users[userId].strategy) || {}) } };
+  await ctx.answerCbQuery();
+  await askStrategyField(ctx, userId);
+});
+
+bot.on('text', async (ctx: any, next: any) => {
+  const userId = String(ctx.from?.id);
+  if (!strategyWizard[userId]) return next();
+  const wizard = strategyWizard[userId];
+  const field = STRATEGY_FIELDS[wizard.step];
+  let value = ctx.message.text.trim();
+  // Allow skip
+  if (value.toLowerCase() === 'skip' && field.optional) {
+    wizard.data[field.key] = undefined;
+  } else if (field.type === 'number') {
+    const num = Number(value);
+    if (isNaN(num)) {
+      await ctx.reply('❌ Please enter a valid number or type skip.');
+      return;
+    }
+    wizard.data[field.key] = num;
+  } else if (field.type === 'boolean') {
+    if (['yes', 'y', 'true', '✅'].includes(value.toLowerCase())) {
+      wizard.data[field.key] = true;
+    } else if (['no', 'n', 'false', '❌'].includes(value.toLowerCase())) {
+      wizard.data[field.key] = false;
+    } else {
+      await ctx.reply('❌ Please answer with Yes or No.');
+      return;
+    }
+  }
+  wizard.step++;
+  if (wizard.step < STRATEGY_FIELDS.length) {
+    await askStrategyField(ctx, userId);
+  } else {
+    // Save strategy
+    users[userId].strategy = wizard.data;
+    saveUsers(users);
+    delete strategyWizard[userId];
+    await ctx.reply('✅ Your strategy has been updated and saved!');
+    await sendMainMenu(ctx);
+  }
+});
+
+async function askStrategyField(ctx: any, userId: string) {
+  const wizard = strategyWizard[userId];
+  const field = STRATEGY_FIELDS[wizard.step];
+  let current = wizard.data[field.key];
+  let msg = `Step ${wizard.step + 1}/${STRATEGY_FIELDS.length}\n`;
+  msg += `Set <b>${field.label}</b>`;
+  if (field.type === 'boolean') {
+    msg += ` (Yes/No)`;
+  } else if (field.optional) {
+    msg += ` (or type skip)`;
+  }
+  if (current !== undefined) {
+    msg += `\nCurrent: <code>${current}</code>`;
+  }
+  await ctx.reply(msg, { parse_mode: 'HTML' });
+}
+
+// === Honey Points Button Handler ===
+bot.action('honey_points', async (ctx: any) => {
+  await ctx.answerCbQuery();
+  await ctx.reply('🍯 Honey Points system is coming soon!');
+});
+
+// === My Wallet Button Handler ===
+bot.action('my_wallet', async (ctx: any) => {
+  const user = getOrRegisterUser(ctx);
+  await ctx.answerCbQuery();
+  if (user.wallet) {
+    await ctx.reply(`👛 Your wallet address:\n<code>${user.wallet}</code>`, { parse_mode: 'HTML' });
+  } else {
+    await ctx.reply('You do not have a wallet yet. Use the "Create Wallet" button to generate one.');
+  }
+});
+
+// === Sell All Wallet Button Handler ===
+bot.action('sell_all_wallet', async (ctx: any) => {
+  await ctx.answerCbQuery();
+  await ctx.reply('💰 Sell All feature is coming soon!');
+});
+
+// === Copy Trade Button Handler ===
+bot.action('copy_trade', async (ctx: any) => {
+  await ctx.answerCbQuery();
+  await ctx.reply('📋 Copy Trade feature is coming soon!');
+});
+
+// === Invite Friends Button Handler ===
+bot.action('invite_friends', async (ctx: any) => {
+  const userId = String(ctx.from?.id);
+  const inviteLink = getUserInviteLink(userId, ctx);
+  await ctx.answerCbQuery();
+  await ctx.reply(`🔗 Share this link to invite your friends:\n${inviteLink}`);
+});
+
+
+
+
+
 // Telegram bot core variables
 let users: Record<string, any> = loadUsers();
-let awaitingUsers: Record<string, any> = {};
+
+// Register strategy handlers and token notifications from wsListener (after users is defined)
+
+import { registerWsNotifications } from './wsListener';
+
+// Register token notification logic (DexScreener or WebSocket)
+registerWsNotifications(bot, users);
+
 
 // Global Token Cache for Sniper Speed
 let globalTokenCache: any[] = [];
@@ -57,15 +250,30 @@ const WELCOME_STICKER = 'CAACAgUAAxkBAAEBQY1kZ...'; // Welcome sticker ID
 // Users file
 const USERS_FILE = 'users.json';
 
-// Track tokens bought automatically per user to avoid duplicates
 let boughtTokens: Record<string, Set<string>> = {};
+// Cleanup boughtTokens for users who have not bought tokens in the last 24h
+function cleanupBoughtTokens() {
+  const now = Date.now();
+  for (const userId in boughtTokens) {
+    const user = users[userId];
+    if (!user || !user.history) {
+      delete boughtTokens[userId];
+      continue;
+    }
+    // Remove tokens older than 24h from the set (if you store timestamps in history)
+    // For now, just keep the set as is, but you can enhance this logic if you store timestamps
+    // Optionally, clear the set if user has no active strategy
+    if (!user.strategy || !user.strategy.enabled) {
+      boughtTokens[userId].clear();
+    }
+  }
+}
+setInterval(cleanupBoughtTokens, 60 * 60 * 1000); // Clean every hour
 
-// Define fetchUnifiedTokenList at top level
-async function fetchUnifiedTokenList() {
-  // ...existing code for fetching tokens...
-  // This should be the same logic as previously implemented
-  // If you need the full code, copy from previous implementation
-  return []; // Placeholder, replace with actual logic
+// Placeholder: Replace with real token fetch logic (e.g., from dexscreener API or your own source)
+async function fetchUnifiedTokenList(): Promise<any[]> {
+  // TODO: Implement real token fetch logic here
+  return [];
 }
 
 // Define addHoneyToken at top level
@@ -136,51 +344,73 @@ async function autoStrategyMonitor() {
 // Run auto strategy monitor every 5 seconds (for faster response in testing)
 setInterval(autoStrategyMonitor, 5000);
 
-// Restore Wallet button handler
-bot.action('restore_wallet', async (ctx: any) => {
-  const userId = String(ctx.from?.id);
-  awaitingUsers[userId] = 'await_restore_secret';
-  await ctx.reply(
-    '🔑 To restore your wallet, please send your Solana private key in one of the following formats:\n\n1. Base58 (most common, 44-88 characters, letters & numbers)\n2. Base64 (88 characters)\n3. JSON Array (64 numbers)\n\nExample (Base58):\n4f3k2...\nExample (Base64):\nM3J5dG...Z2F0ZQ==\nExample (JSON Array):\n[12,34,...]\n\n⚠️ Never share your private key with anyone!\nYou can press Cancel to exit.',
-    {...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'cancel_restore_wallet')]])}
-  );
-});
+// Restore Wallet button handler is now registered in wsListener
+
 
 // Create Wallet button handler
 bot.action('create_wallet', async (ctx: any) => {
-  const userId = String(ctx.from?.id);
+  const user = getOrRegisterUser(ctx);
   // Generate new wallet using generateKeypair utility
   const { generateKeypair } = await import('./wallet');
   const keypair = generateKeypair();
-  users[userId] = users[userId] || { trades: 0, activeTrades: 1, history: [] };
-  users[userId].wallet = keypair.publicKey.toBase58();
-  users[userId].secret = Buffer.from(keypair.secretKey).toString('base64');
-  users[userId].history = users[userId].history || [];
-  users[userId].history.push('Created new wallet');
+  user.wallet = keypair.publicKey.toBase58();
+  user.secret = Buffer.from(keypair.secretKey).toString('base64');
+  user.history = user.history || [];
+  user.history.push('Created new wallet');
   saveUsers(users);
-  await ctx.reply('✅ New wallet created! Your address: ' + users[userId].wallet);
+  await ctx.reply('✅ New wallet created! Your address: ' + user.wallet);
   await sendMainMenu(ctx);
 });
 
 // Export Private Key button handler
 
 // === Add generic handlers for all main menu buttons that have no logic yet ===
-const unimplementedActions = [
-  'set_strategy',
-  'honey_points',
-  'buy',
-  'sell',
-  'sell_all_wallet',
-  'invite_friends',
-  'copy_trade',
-  'my_wallet'
-];
-for (const action of unimplementedActions) {
-  bot.action(action, async (ctx: any) => {
-    await ctx.answerCbQuery(); // Close Telegram loading animation
-    await ctx.reply('🚧 هذا الزر قيد التطوير أو لم يتم تفعيله بعد.');
-  });
-}
+
+
+// === Activity Button Handler ===
+bot.action('show_activity', async (ctx: any) => {
+  const user = getOrRegisterUser(ctx);
+  await ctx.answerCbQuery();
+  if (!Array.isArray(user.history) || user.history.length === 0) {
+    await ctx.reply('No activity found for your account.');
+    return;
+  }
+  const lastHistory = user.history.slice(-20).reverse();
+  const msg = [
+    '<b>Your recent activity:</b>',
+    ...lastHistory.map((entry: string) => `- ${entry}`)
+  ].join('\n');
+  await ctx.reply(msg, { parse_mode: 'HTML' });
+});
+
+// تنفيذ الشراء عند اختيار توكن
+bot.action(/buy_token_(.+)/, async (ctx: any) => {
+  const userId = String(ctx.from?.id);
+  const user = users[userId];
+  if (!user || !user.secret) {
+    await ctx.reply(helpMessages.wallet_needed, walletKeyboard());
+    return;
+  }
+  const tokenAddress = ctx.match[1];
+  const buyAmount = user.strategy?.buyAmount ?? 0.01;
+  await ctx.reply(`🚀 Executing buy...\nAddress: ${tokenAddress}\nAmount: ${buyAmount} SOL`);
+  try {
+    const { tx, source } = await unifiedBuy(tokenAddress, buyAmount, user.secret);
+    user.history = user.history || [];
+    user.history.push(`ManualBuy: ${tokenAddress} | Amount: ${buyAmount} SOL | Source: ${source} | Tx: ${tx}`);
+    saveUsers(users);
+    await ctx.reply(
+      `✅ Token bought successfully!\n\n` +
+      `<b>Token:</b> <code>${tokenAddress}</code>\n` +
+      `<b>Amount:</b> ${buyAmount} SOL\n` +
+      `<b>Source:</b> ${source}\n` +
+      `<b>Transaction:</b> <a href='https://solscan.io/tx/${tx}'>${tx}</a>`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (e: any) {
+    await ctx.reply('❌ Buy failed: ' + getErrorMessage(e));
+  }
+});
 bot.action('exportkey', async (ctx: any) => {
   const userId = String(ctx.from?.id);
   const user = users[userId];
@@ -215,14 +445,14 @@ async function sendMainMenu(ctx: any) {
 }
 
 // Helper: Format numbers for display
-function formatNumber(val: any, digits = 2) {
+function formatNumber(val: number | string, digits = 2): string {
   if (typeof val === 'number') return val.toLocaleString(undefined, { maximumFractionDigits: digits });
   if (!isNaN(Number(val))) return Number(val).toLocaleString(undefined, { maximumFractionDigits: digits });
-  return val ?? '-';
+  return val ? String(val) : '-';
 }
 
 // Helper: Format token info for display (unified fields)
-function formatTokenMsg(t: any, i: number) {
+function formatTokenMsg(t: Record<string, any>, i: number): string {
   const address = t.address || t.tokenAddress || t.pairAddress || '-';
   const symbol = t.symbol || t.baseToken?.symbol || '-';
   const name = t.name || t.baseToken?.name || '-';
@@ -273,163 +503,10 @@ bot.action('show_tokens', async (ctx: any) => {
 // ...existing code...
 
 
-// ========== User Registration and Wallet Setup ==========
-// Single event handler for all text cases
-bot.on('text', async (ctx: any) => {
-  const userId = String(ctx.from?.id);
-  const text = ctx.message.text.trim();
-  if (text === '/start') {
-    await sendMainMenu(ctx);
-    return;
-  }
-  if (!users[userId]) users[userId] = { trades: 0, activeTrades: 1, history: [] };
-  const user = users[userId];
-  user.lastMessageAt = Date.now();
-  limitHistory(user);
-  console.log(`📝 Received text from ${userId}: ${text}`);
-
-  // Restore wallet secret
-  if (awaitingUsers[userId] === 'await_restore_secret') {
-    try {
-      let secretKey: number[] | null = null;
-      if (text.length >= 44 && text.length <= 88) {
-        const decoded = Buffer.from(text, text.includes('=') ? 'base64' : 'utf8');
-        if (decoded.length === 32) secretKey = Array.from(decoded);
-      } else if (text.startsWith('[') && text.endsWith(']')) {
-        secretKey = JSON.parse(text);
-      }
-      if (secretKey) {
-        const keypair = loadKeypair(secretKey);
-        users[userId].wallet = keypair.publicKey.toBase58();
-        users[userId].secret = Buffer.from(keypair.secretKey).toString('base64');
-        users[userId].history = users[userId].history || [];
-        users[userId].history.push('Restored wallet');
-        saveUsers(users);
-        await ctx.reply('✅ Wallet restored! Your address: ' + users[userId].wallet);
-        await sendMainMenu(ctx);
-      } else {
-        await ctx.reply('Invalid secret key format. Please send your private key in Base58, Base64, or JSON Array format.');
-      }
-    } catch (e) {
-      console.error('❌ Error restoring wallet:', e);
-      await ctx.reply('Error restoring wallet: ' + getErrorMessage(e));
-    }
-    return;
-  }
-
-  // Dynamic strategy input (step-by-step)
-
 // Start the Telegram bot if this file is run directly
 if (require.main === module) {
   bot.launch()
     .then(() => console.log('✅ Telegram bot started and listening for users!'))
     .catch((err: any) => console.error('❌ Bot launch failed:', err));
 }
-  if (awaitingUsers[userId] && typeof awaitingUsers[userId] === 'object' && 'step' in awaitingUsers[userId]) {
-    // Unified with DEXSCREENER fields
-    const strategyFields = [
-      { key: 'minVolume', label: 'Min Volume (USD)', type: 'number', default: 1000 },
-      { key: 'minHolders', label: 'Min Holders', type: 'number', default: 50 },
-      { key: 'minAge', label: 'Min Age (minutes)', type: 'number', default: 10 },
-      { key: 'minMarketCap', label: 'Min MarketCap (USD)', type: 'number', default: 50000 },
-      { key: 'maxAge', label: 'Max Age (minutes)', type: 'number', default: 60 },
-      { key: 'onlyVerified', label: 'Verified only', type: 'select', options: ['true', 'false'], default: 'true' },
-      { key: 'fastListing', label: 'Fast listing', type: 'select', options: ['true', 'false'], default: 'true' }
-    ];
-    let step = Number(awaitingUsers[userId]?.step ?? 0);
-    let temp = typeof awaitingUsers[userId]?.temp === 'object' && awaitingUsers[userId].temp ? awaitingUsers[userId].temp : {};
-
-    // تحقق من صحة الخطوة الحالية
-    if (step < 0 || step >= strategyFields.length) {
-      delete awaitingUsers[userId];
-      await ctx.reply('❌ Strategy setup error. Please start again.');
-      return;
-    }
-
-    const currentField = strategyFields[step];
-    if (currentField.type === 'number') {
-      const val = parseFloat(text);
-      if (isNaN(val) || val < 0) {
-        await ctx.reply(`❌ Please enter a valid positive number for ${currentField.label} (default: ${currentField.default}).`);
-        return;
-      }
-      temp[currentField.key] = val;
-    } else if (currentField.type === 'select') {
-      // لا يتم التعامل مع select هنا بل عبر الأزرار
-    }
-
-    step++;
-    if (step < strategyFields.length) {
-      awaitingUsers[userId] = { step, temp };
-      const nextField = strategyFields[step];
-      if (nextField.type === 'number') {
-        await ctx.reply(`Enter value for <b>${nextField.label}</b> (default: ${nextField.default}):`, { parse_mode: 'HTML' });
-      } else if (nextField.type === 'select') {
-        const options = Array.isArray(nextField.options) ? nextField.options : ['true', 'false'];
-        await ctx.reply(`Choose value for <b>${nextField.label}</b>:`, {
-          parse_mode: 'HTML',
-          reply_markup: { inline_keyboard: options.map(opt => [Markup.button.callback(opt, `strategy_${nextField.key}_${opt}`)]) }
-        });
-      }
-      return;
-    }
-
-    // جميع القيم جاهزة، حفظ الاستراتيجية
-    user.strategy = {
-      minVolume: temp.minVolume ?? 1000,
-      minHolders: temp.minHolders ?? 50,
-      minAge: temp.minAge ?? 10,
-      minMarketCap: temp.minMarketCap ?? 50000,
-      maxAge: temp.maxAge ?? 60,
-      onlyVerified: temp.onlyVerified === 'true',
-      fastListing: temp.fastListing === 'true',
-      enabled: true
-    } as Strategy;
-    user.history = user.history || [];
-    user.history.push(`Saved strategy: ${JSON.stringify(user.strategy)}`);
-    saveUsers(users);
-    delete awaitingUsers[userId];
-    // Show summary of the saved strategy
-    let summary = `<b>Strategy saved!</b>\nHere are your settings:`;
-    for (const f of strategyFields) {
-      summary += `\n- <b>${f.label}:</b> ${user.strategy[f.key]}`;
-    }
-    await ctx.reply(summary, { parse_mode: 'HTML' });
-    await ctx.reply('Fetching tokens matching your strategy ...');
-    try {
-      let tokens = await getCachedTokenList();
-      if (!tokens || tokens.length === 0) {
-        await ctx.reply('No tokens found from the available sources. Try again later.');
-        return;
-      }
-      const filtered = filterTokensByStrategy(tokens, user.strategy);
-      const sorted = filtered.slice(0, 10);
-      user.lastTokenList = sorted;
-      user.history = user.history || [];
-      user.history.push('Viewed tokens matching strategy');
-      saveUsers(users);
-      if (sorted.length === 0) {
-        await ctx.reply('❌ No tokens match your strategy at the moment.');
-      } else {
-        for (const [i, t] of sorted.entries()) {
-          let msg = formatTokenMsg(t, i);
-          await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
-        }
-        await ctx.reply('Use the button below to refresh the results.', {
-          reply_markup: { inline_keyboard: [[Markup.button.callback('Refresh', 'refresh_tokens')]] }
-        });
-      }
-    } catch (e) {
-      await ctx.reply('Error fetching tokens: ' + getErrorMessage(e));
-    }
-    return;
-  }
-  // ... باقي منطق الحالات (buy, sell, honey points) ...
-});
-// Start the Telegram bot if this file is run directly
-if (require.main === module) {
-  bot.launch()
-    .then(() => console.log('✅ Telegram bot started and listening for users!'))
-    .catch((err: any) => console.error('❌ Bot launch failed:', err));
-}
-  // Dynamic strategy input (step-by-step)
+// Dynamic strategy input (step-by-step)

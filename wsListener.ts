@@ -1,39 +1,12 @@
-import WebSocket from 'ws';
+
+
 import dotenv from 'dotenv';
-dotenv.config();
-
-
-// WebSocket sources from environment variables
-
-// Only DexScreener source allowed
-const sources: Record<string, string | undefined> = {
-  dexscreener: process.env.DEXSCREENER_WS_URL,
-};
-
-const selectedSource = process.env.WS_SOURCE;
-if (!selectedSource || !sources[selectedSource]) {
-  console.error(`WebSocket source '${selectedSource}' not found or not set in .env`);
-  process.exit(1);
-}
-const wsUrl = sources[selectedSource];
-
 import axios from 'axios';
 import { filterTokensByStrategy } from './bot/strategy';
 import { Strategy } from './bot/types';
-import { Telegraf } from 'telegraf';
-import fs from 'fs';
-const USERS_FILE = 'users.json';
-let users: Record<string, any> = {};
-try {
-  if (fs.existsSync(USERS_FILE)) {
-    users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-  }
-} catch (err) {
-  console.error('Error loading users.json:', err);
-}
+dotenv.config();
 
-// Function to get strategy settings for a user from users.json, fallback to .env
-function getUserStrategy(userId?: string): Strategy {
+function getUserStrategy(users: Record<string, any>, userId?: string): Strategy {
   if (userId && users[userId] && users[userId].strategy) {
     return users[userId].strategy;
   }
@@ -49,148 +22,78 @@ function getUserStrategy(userId?: string): Strategy {
   };
 }
 
-if (selectedSource === 'dexscreener') {
-  // DexScreener uses HTTP API, not WebSocket
+let awaitingUsers: Record<string, any> = {};
+(globalThis as any).awaitingUsers = awaitingUsers;
+
+// Poll DexScreener REST API and notify users
+function registerWsNotifications(bot: any, users: Record<string, any>) {
   async function fetchDexScreenerTokens() {
     try {
-      // تحديد نوع الإجراء من .env أو الافتراضي
-      const actionType = process.env.DEXSCREENER_API_TYPE || 'boosts';
-      let endpoint: string | undefined;
-      switch (actionType) {
-        case 'boosts':
-          endpoint = process.env.DEXSCREENER_API_ENDPOINT_BOOSTS;
-          break;
-        case 'profiles':
-          endpoint = process.env.DEXSCREENER_API_ENDPOINT_PROFILES;
-          break;
-        case 'search':
-          endpoint = process.env.DEXSCREENER_API_ENDPOINT_SEARCH;
-          break;
-        default:
-          endpoint = process.env.DEXSCREENER_API_ENDPOINT;
-      }
-      if (!endpoint) {
-        throw new Error('DexScreener endpoint not set in .env');
-      }
+      const endpoint = process.env.DEXSCREENER_API_ENDPOINT_BOOSTS || 'https://api.dexscreener.com/token-boosts/latest/v1';
       const response = await axios.get(endpoint);
-
-      let tokens: any[] = [];
-      let dataType = '';
-      if (endpoint.includes('token-boosts')) {
-        tokens = response.data?.pairs || response.data?.tokens || response.data || [];
-        dataType = 'boosts';
-      } else if (endpoint.includes('token-profiles')) {
-        tokens = response.data?.profiles || response.data?.tokens || response.data || [];
-        dataType = 'profiles';
-      } else if (endpoint.includes('dex/search')) {
-        tokens = response.data?.pairs || response.data?.tokens || response.data || [];
-        dataType = 'search';
-      } else {
-        tokens = response.data?.pairs || response.data?.tokens || response.data || [];
-        dataType = 'unknown';
-      }
-      console.log(`[DexScreener] Data type: ${dataType}, Tokens received:`, Array.isArray(tokens) ? tokens.length : typeof tokens);
-      // Print raw tokens for inspection
-      if (Array.isArray(tokens)) {
-        console.log('--- Raw tokens sample (first 3) ---');
-        tokens.slice(0, 3).forEach((t, i) => {
-          console.log(`Token #${i+1}:`, JSON.stringify(t, null, 2));
-        });
-      } else {
-        console.log('Raw tokens:', JSON.stringify(tokens, null, 2));
-      }
-      // Use per-user strategy for each user
+      const tokens: any[] = response.data?.pairs || response.data?.tokens || response.data || [];
       let notified = false;
       Object.keys(users).forEach(uid => {
-        const strategy = getUserStrategy(uid);
+        const strategy = getUserStrategy(users, uid);
         const filtered = filterTokensByStrategy(tokens, strategy);
-        if (filtered.length > 0 && bot && users[uid].telegramId) {
+        if (filtered.length > 0 && bot) {
           notified = true;
-          console.log(`Filtered tokens (strategy matched for user ${uid}):`);
           filtered.forEach((token, idx) => {
-            console.log(`#${idx+1}:`, JSON.stringify(token, null, 2));
-            const msg = `🚀 New token matched your strategy (DexScreener):\n` +
-              `<b>Address:</b> <code>${token.address || token.mint || token.tokenAddress || 'N/A'}</code>\n` +
-              `<b>MarketCap:</b> ${token.marketCap || 'N/A'}\n` +
-              `<b>Volume:</b> ${token.volume || token.amount || 'N/A'}\n` +
-              `<b>Age:</b> ${token.age || 'N/A'} min\n`;
-            bot.telegram.sendMessage(users[uid].telegramId, msg, { parse_mode: 'HTML' });
+            // فقط عملات سولانا
+            const chain = (token.chainId || token.chain || token.chainName || '').toString().toLowerCase();
+            if (chain && !chain.includes('sol')) return;
+
+            // استخراج البيانات
+            const address = token.tokenAddress || token.address || token.mint || token.pairAddress || 'N/A';
+            const symbol = token.symbol || token.baseToken?.symbol || '-';
+            const name = token.name || token.baseToken?.name || '-';
+            const priceUsd = token.priceUsd ?? token.price ?? token.priceNative ?? undefined;
+            const priceSol = token.priceSol ?? (priceUsd && token.baseToken?.priceUsd ? (Number(priceUsd) / Number(token.baseToken.priceUsd)).toFixed(4) : undefined);
+            const marketCap = token.marketCap ?? token.fdv;
+            const holders = token.holders ?? token.totalAmount;
+            const age = token.age;
+            const verified = token.verified !== undefined ? token.verified : (token.baseToken?.verified !== undefined ? token.baseToken.verified : '-');
+            const volume = token.volume ?? token.volume24h ?? token.amount;
+            const logo = token.logoURI || token.logo || token.baseToken?.logoURI || undefined;
+            const pairAddress = token.pairAddress || address;
+            // روابط DexScreener
+            const dexBase = process.env.DEXSCREENER_BASE_URL || 'https://dexscreener.com/solana';
+            const dexUrl = `${dexBase}/${pairAddress}`;
+            // رابط دعوة البوت
+            const botUsername = process.env.BOT_USERNAME || 'YourBotUsername';
+            const inviteUrl = `https://t.me/${botUsername}?start=${address}`;
+
+            // تنسيق الأرقام
+            function fmt(val: number | string | undefined | null, digits = 2): string {
+              if (val === undefined || val === null) return '-';
+              if (typeof val === 'number') return val.toLocaleString(undefined, { maximumFractionDigits: digits });
+              if (!isNaN(Number(val))) return Number(val).toLocaleString(undefined, { maximumFractionDigits: digits });
+              return String(val);
+            }
+
+            let msg = `🚀 <b>Token Alert!</b>\n`;
+            if (logo) msg += `<a href='${dexUrl}'><img src='${logo}' width='32' height='32'/></a>\n`;
+            msg += `<b>Name:</b> ${name} (${symbol})\n`;
+            msg += `<b>Address:</b> <code>${address}</code>\n`;
+            if (priceUsd) msg += `<b>Price (USD):</b> $${fmt(priceUsd, 6)}\n`;
+            if (priceSol) msg += `<b>Price (SOL):</b> ${fmt(priceSol, 6)}\n`;
+            if (marketCap) msg += `<b>MarketCap:</b> $${fmt(marketCap)}\n`;
+            if (volume) msg += `<b>Volume (24h):</b> $${fmt(volume)}\n`;
+            if (holders) msg += `<b>Holders:</b> ${fmt(holders, 0)}\n`;
+            if (age) msg += `<b>Age:</b> ${fmt(age, 0)} min\n`;
+            msg += `<b>Verified:</b> ${verified === true || verified === 'true' ? '✅' : '❌'}\n`;
+            msg += `\n<a href='${dexUrl}'>View on DexScreener</a> | <a href='${inviteUrl}'>Share via Bot</a>`;
+
+            bot.telegram.sendMessage(uid, msg, { parse_mode: 'HTML', disable_web_page_preview: false });
           });
         }
       });
-      if (!notified) {
-        console.log('No tokens matched any user strategy.');
-      }
     } catch (err) {
-      console.error('DexScreener API error:', err);
+      // يمكن إضافة لوج هنا عند الحاجة
     }
   }
-  // جلب البيانات كل دقيقة تلقائياً
   setInterval(fetchDexScreenerTokens, 60 * 1000);
-  // جلب أولي عند التشغيل
   fetchDexScreenerTokens();
-} else {
-  if (!wsUrl) {
-    console.error(`WebSocket URL for source '${selectedSource}' not found in .env`);
-    process.exit(1);
-  }
-  const ws = new WebSocket(wsUrl);
-  ws.on('open', () => {
-    console.log(`WebSocket connection opened: [${selectedSource}]`, wsUrl);
-    // You can send a subscription message here if required by the source documentation
-  });
-  ws.on('message', (data: WebSocket.Data) => {
-    try {
-      const json = JSON.parse(data.toString());
-      // Assume incoming data is a single token or an array of tokens
-      const tokens = Array.isArray(json) ? json : [json];
-      // Print raw tokens for inspection
-      if (Array.isArray(tokens)) {
-        console.log('--- Raw tokens sample (first 3) ---');
-        tokens.slice(0, 3).forEach((t, i) => {
-          console.log(`Token #${i+1}:`, JSON.stringify(t, null, 2));
-        });
-      } else {
-        console.log('Raw tokens:', JSON.stringify(tokens, null, 2));
-      }
-      // Use per-user strategy for each user
-      let notified = false;
-      Object.keys(users).forEach(uid => {
-        const strategy = getUserStrategy(uid);
-        const filtered = filterTokensByStrategy(tokens, strategy);
-        if (filtered.length > 0 && bot && users[uid].telegramId) {
-          notified = true;
-          console.log(`Filtered tokens (strategy matched for user ${uid}):`);
-          filtered.forEach((token, idx) => {
-            console.log(`#${idx+1}:`, JSON.stringify(token, null, 2));
-            const msg = `🚀 New token matched your strategy:\n` +
-              `<b>Address:</b> <code>${token.address || token.mint || token.tokenAddress || 'N/A'}</code>\n` +
-              `<b>MarketCap:</b> ${token.marketCap || 'N/A'}\n` +
-              `<b>Volume:</b> ${token.volume || token.amount || 'N/A'}\n` +
-              `<b>Age:</b> ${token.age || 'N/A'} min\n`;
-            bot.telegram.sendMessage(users[uid].telegramId, msg, { parse_mode: 'HTML' });
-          });
-        }
-      });
-      if (!notified) {
-        console.log('No tokens matched any user strategy.');
-      }
-    } catch (e) {
-      console.log('Raw message:', data);
-    }
-  });
-  ws.on('error', (err: Error) => {
-    console.error('WebSocket error:', err);
-  });
-  ws.on('close', () => {
-    console.log('WebSocket connection closed');
-  });
 }
 
-// Initialize Telegram bot
-const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
-const telegramUserId = process.env.TELEGRAM_USER_ID;
-if (!telegramToken || !telegramUserId) {
-  console.warn('Telegram bot token or user ID not set in .env, notifications will be disabled.');
-}
-const bot = telegramToken ? new Telegraf(telegramToken) : undefined;
+export { registerWsNotifications };

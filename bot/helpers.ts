@@ -1,39 +1,43 @@
-import { User } from './types';
-import { Markup } from 'telegraf';
 import fs from 'fs';
+import { Markup } from 'telegraf';
 
 export function getErrorMessage(e: any): string {
-  return e?.message || String(e);
+  if (!e) return 'Unknown error';
+  if (typeof e === 'string') return e;
+  if (e.message) return e.message;
+  return JSON.stringify(e);
 }
 
-export function limitHistory(user: User) {
-  if (user.history && user.history.length > 100) {
-    user.history = user.history.slice(-100);
+export function limitHistory(user: any, max = 50) {
+  if (user && Array.isArray(user.history) && user.history.length > max) {
+    user.history = user.history.slice(-max);
   }
 }
 
-export function hasWallet(user?: User): boolean {
+export function hasWallet(user: any): boolean {
   return !!(user && user.wallet && user.secret);
 }
 
 export function walletKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('🔑 Restore Wallet', 'restore_wallet'), Markup.button.callback('🆕 Create Wallet', 'create_wallet')]
+    [Markup.button.callback('🔑 Restore Wallet', 'restore_wallet')],
+    [Markup.button.callback('🆕 Create Wallet', 'create_wallet')]
   ]);
 }
 
-export function saveUsers(users: Record<string, User>, file: string = 'users.json') {
+export function loadUsers(): Record<string, any> {
   try {
-    fs.writeFileSync(file, JSON.stringify(users, null, 2));
-  } catch {}
-}
-
-export function loadUsers(file: string = 'users.json'): Record<string, User> {
-  try {
-    if (fs.existsSync(file)) {
-      const raw = fs.readFileSync(file, 'utf8');
-      return JSON.parse(raw);
+    if (fs.existsSync('users.json')) {
+      return JSON.parse(fs.readFileSync('users.json', 'utf8'));
     }
   } catch {}
   return {};
+}
+
+export function saveUsers(users: Record<string, any>) {
+  try {
+    fs.writeFileSync('users.json', JSON.stringify(users, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Error saving users.json:', e);
+  }
 }

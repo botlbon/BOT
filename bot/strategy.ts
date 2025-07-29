@@ -1,70 +1,35 @@
-// Strategy logic and filtering
-import { User } from './types';
+// Simple filterTokensByStrategy implementation
+import type { Strategy } from './types';
 
 /**
- * Filter tokens by user strategy
- * @param tokens Array of tokens
- * @param strategy User strategy object
+ * Filters a list of tokens based on the user's strategy settings.
+ * This is a basic example and should be customized for your real token structure.
  */
-export interface Strategy {
-  minVolume?: number;
-  minHolders?: number;
-  minAge?: number;
-  enabled?: boolean;
-  onlyVerified?: boolean;
-  minMarketCap?: number;
-  maxAge?: number;
-  fastListing?: boolean;
-}
+export function filterTokensByStrategy(tokens: any[], strategy: Strategy): any[] {
+  if (!strategy || !Array.isArray(tokens)) return [];
+  return tokens.filter(token => {
+    // استخدم volume أو amount
+    const volume = Number(token.volume ?? token.amount ?? 0);
+    if (strategy.minVolume && volume < strategy.minVolume) return false;
 
-export function filterTokensByStrategy(tokens: any[], strategy?: Strategy): any[] {
-  if (!strategy || !strategy.enabled) return tokens;
-  return tokens.filter((t: any) => {
-    let ok = true;
-    // minVolume: إذا لم تتوفر خاصية volume أو price أو marketCap، تجاهل الشرط
-    if (typeof strategy.minVolume === 'number') {
-      if (typeof t.volume === 'number') {
-        ok = ok && t.volume >= strategy.minVolume;
-      } else if (typeof t.price === 'number' && typeof t.marketCap === 'number') {
-        ok = ok && (t.price * t.marketCap) >= strategy.minVolume;
-      } // إذا لم تتوفر أي من القيم، تجاهل الشرط
-    }
-    // minHolders
-    if (typeof strategy.minHolders === 'number') {
-      if (typeof t.holders === 'number') {
-        ok = ok && t.holders >= strategy.minHolders;
-      } // إذا لم تتوفر holders، تجاهل الشرط
-    }
-    // minAge
-    if (typeof strategy.minAge === 'number') {
-      if (typeof t.age === 'number') {
-        ok = ok && t.age >= strategy.minAge;
-      } // إذا لم تتوفر age، تجاهل الشرط
-    }
-    // maxAge
-    if (typeof strategy.maxAge === 'number') {
-      if (typeof t.age === 'number') {
-        ok = ok && t.age <= strategy.maxAge;
-      } // إذا لم تتوفر age، تجاهل الشرط
-    }
-    // minMarketCap
-    if (typeof strategy.minMarketCap === 'number') {
-      if (typeof t.marketCap === 'number') {
-        ok = ok && t.marketCap >= strategy.minMarketCap;
-      } // إذا لم تتوفر marketCap، تجاهل الشرط
-    }
-    // onlyVerified
-    if (strategy.onlyVerified) {
-      if ('verified' in t) {
-        ok = ok && t.verified === true;
-      } // إذا لم تتوفر verified، تجاهل الشرط
-    }
-    // fastListing
-    if (strategy.fastListing) {
-      if (typeof t.age === 'number') {
-        ok = ok && t.age < 30;
-      } // إذا لم تتوفر age، تجاهل الشرط
-    }
-    return ok;
+    // استخدم holders أو totalAmount
+    const holders = Number(token.holders ?? token.totalAmount ?? 0);
+    if (strategy.minHolders && holders < strategy.minHolders) return false;
+
+    // العمر بالدقائق
+    const age = Number(token.age ?? 0);
+    if (strategy.minAge && age < strategy.minAge) return false;
+    if (strategy.maxAge && age > strategy.maxAge) return false;
+
+    // ماركت كاب
+    const marketCap = Number(token.marketCap ?? 0);
+    if (strategy.minMarketCap && marketCap < strategy.minMarketCap) return false;
+
+    // التحقق
+    const verified = token.verified === true || token.verified === 'true';
+    if (strategy.onlyVerified && !verified) return false;
+
+    // يمكن إضافة شروط أخرى هنا حسب الحاجة
+    return true;
   });
 }
