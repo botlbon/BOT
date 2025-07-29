@@ -7,7 +7,7 @@ import { PublicKey } from '@solana/web3.js';
 
 export async function sellWithOrca(tokenMint: string, amountIn: number) {
   const connection = getConnection();
-  if (!process.env.PRIVATE_KEY) throw new Error('PRIVATE_KEY غير معرف في ملف البيئة');
+  if (!process.env.PRIVATE_KEY) throw new Error('PRIVATE_KEY is not set in the environment file');
   const wallet = loadKeypair(JSON.parse(process.env.PRIVATE_KEY));
   const network = process.env.NETWORK === 'devnet' ? Network.DEVNET : Network.MAINNET;
   const orca = getOrca(connection, network);

@@ -5,7 +5,7 @@ import { PublicKey } from '@solana/web3.js';
 
 export async function mintToken() {
   const connection = getConnection();
-  if (!process.env.PRIVATE_KEY) throw new Error('PRIVATE_KEY غير معرف في ملف البيئة');
+  if (!process.env.PRIVATE_KEY) throw new Error('PRIVATE_KEY is not set in the environment file');
   const payer = loadKeypair(JSON.parse(process.env.PRIVATE_KEY));
 
   const decimals = parseInt(process.env.DECIMALS || '6');

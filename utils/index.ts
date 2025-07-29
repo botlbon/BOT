@@ -81,7 +81,7 @@ async function main() {
     firstBuyDetected = true;
     console.log(`💰 تم الكشف عن أول عملية شراء خارجية لـ ${TOKEN_NAME} ($${TOKEN_SYMBOL})!`);
     if (!process.env.PUBLIC_KEY) {
-      console.error('❌ PUBLIC_KEY غير معرف في ملف البيئة.');
+      console.error('❌ PUBLIC_KEY is not set in the environment file.');
       return;
     }
     const boughtAmount = await getBoughtAmount(mint, process.env.PUBLIC_KEY);

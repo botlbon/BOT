@@ -4,12 +4,10 @@ dotenv.config();
 
 
 // WebSocket sources from environment variables
+
+// Only DexScreener source allowed
 const sources: Record<string, string | undefined> = {
-  helius: process.env.HELIUS_WS_URL,
-  eclipse: process.env.HELIUS_ECLIPSE_URL,
-  unstaked: process.env.HELIUS_UNSTAKED_URL,
   dexscreener: process.env.DEXSCREENER_WS_URL,
-  // أضف أي مصدر جديد مباشرة من .env فقط
 };
 
 const selectedSource = process.env.WS_SOURCE;

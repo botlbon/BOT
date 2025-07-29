@@ -3,7 +3,7 @@ import { Keypair, Connection, clusterApiUrl } from '@solana/web3.js';
 // تحميل المفتاح من ملف البيئة
 export function loadKeypair(secret: number[]): Keypair {
   if (!secret || !Array.isArray(secret) || secret.length < 32) {
-    throw new Error('مفتاح خاص غير صالح. تحقق من PRIVATE_KEY في ملف البيئة.');
+    throw new Error('Invalid private key. Check PRIVATE_KEY in the environment file.');
   }
   return Keypair.fromSecretKey(Uint8Array.from(secret));
 }

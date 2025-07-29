@@ -11,7 +11,7 @@ import Decimal from 'decimal.js';
 export async function autoBuy(tokenMint: string, solAmount: number, secretKey: string): Promise<string> {
   // تحقق من متغيرات البيئة الأساسية
   if (!secretKey) throw new Error('لم يتم توفير المفتاح الخاص للمستخدم.');
-  if (!process.env.NETWORK) throw new Error('NETWORK غير معرف في ملف البيئة.');
+  if (!process.env.NETWORK) throw new Error('NETWORK is not set in the environment file.');
   // slippage اختياري لكن يفضل التحقق من صحته
   const slippageValue = process.env.SLIPPAGE ? Number(process.env.SLIPPAGE) : 0.01;
   if (isNaN(slippageValue) || slippageValue <= 0 || slippageValue > 0.5) throw new Error('SLIPPAGE غير صالح (يفضل بين 0.001 و 0.5)');

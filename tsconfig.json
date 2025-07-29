@@ -1,13 +1,22 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "commonjs",
+    "moduleResolution": "node",
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "strict": true,
     "skipLibCheck": true,
-    "outDir": "dist"
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "*": ["*"],
+      "@/*": ["./*"],
+      "bot/*": ["./bot/*"],
+      "utils/*": ["./utils/*"]
+    },
+    "typeRoots": ["./node_modules/@types", "./types"]
   },
-  "include": ["*.ts", "utils/**/*.ts"]
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", "**/*.test.ts"]
 }
