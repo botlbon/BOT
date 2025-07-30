@@ -8,28 +8,30 @@ import type { Strategy } from './types';
 export function filterTokensByStrategy(tokens: any[], strategy: Strategy): any[] {
   if (!strategy || !Array.isArray(tokens)) return [];
   return tokens.filter(token => {
-    // استخدم volume أو amount
-    const volume = Number(token.volume ?? token.amount ?? 0);
-    if (strategy.minVolume && volume < strategy.minVolume) return false;
+    // السعر بالدولار
+    const price = Number(token.priceUsd ?? token.price ?? token.priceNative ?? 0);
+    if (strategy.minPrice && price < strategy.minPrice) return false;
+    if (strategy.maxPrice && price > strategy.maxPrice) return false;
 
-    // استخدم holders أو totalAmount
+    // ماركت كاب
+    const marketCap = Number(token.marketCap ?? token.fdv ?? 0);
+    if (strategy.minMarketCap && marketCap < strategy.minMarketCap) return false;
+
+    // الهولدرز
     const holders = Number(token.holders ?? token.totalAmount ?? 0);
     if (strategy.minHolders && holders < strategy.minHolders) return false;
 
     // العمر بالدقائق
     const age = Number(token.age ?? 0);
     if (strategy.minAge && age < strategy.minAge) return false;
-    if (strategy.maxAge && age > strategy.maxAge) return false;
 
-    // ماركت كاب
-    const marketCap = Number(token.marketCap ?? 0);
-    if (strategy.minMarketCap && marketCap < strategy.minMarketCap) return false;
-
-    // التحقق
-    const verified = token.verified === true || token.verified === 'true';
+    // التوثيق
+    const verified = token.verified === true || token.verified === 'true' || (token.baseToken && (token.baseToken.verified === true || token.baseToken.verified === 'true'));
     if (strategy.onlyVerified && !verified) return false;
 
-    // يمكن إضافة شروط أخرى هنا حسب الحاجة
+    // تفعيل الاستراتيجية
+    if (strategy.enabled === false) return false;
+
     return true;
   });
 }

@@ -1,11 +1,13 @@
 export interface Strategy {
-  minVolume?: number;
+  minPrice?: number;
+  maxPrice?: number;
+  minMarketCap?: number;
   minHolders?: number;
   minAge?: number;
-  minMarketCap?: number;
-  maxAge?: number;
   onlyVerified?: boolean;
-  fastListing?: boolean;
   enabled?: boolean;
-  // Add more fields as needed
+  buyAmount?: number;
+  profitTargets?: string;
+  sellPercents?: string;
+  stopLossPercent?: number;
 }

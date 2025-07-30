@@ -1,26 +1,31 @@
+
+import dotenv from 'dotenv';
+dotenv.config();
+
 import fs from 'fs';
+import { STRATEGY_FIELDS, buildTokenMessage } from './utils/tokenUtils';
 import { Markup, Telegraf } from 'telegraf';
 import type { Context } from 'telegraf';
 import type { Strategy } from './bot/types';
 import { getErrorMessage, limitHistory, hasWallet, walletKeyboard, loadUsers, saveUsers } from './bot/helpers';
 import { filterTokensByStrategy } from './bot/strategy';
-import dotenv from 'dotenv';
-
-dotenv.config();
-
-
 import { loadKeypair, getConnection } from './wallet';
 import { parseSolanaPrivateKey, toBase64Key } from './keyFormat';
 import { unifiedBuy, unifiedSell } from './tradeSources';
 import { helpMessages } from './helpMessages';
 import { monitorCopiedWallets } from './utils/portfolioCopyMonitor';
 
-dotenv.config();
-
-
+console.log('Loaded TELEGRAM_BOT_TOKEN:', process.env.TELEGRAM_BOT_TOKEN);
 
 export const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!);
 console.log('🚀 Telegram bot script loaded.');
+
+// أمر للمطور: عرض جميع الحقول التي ستظهر في معالج الاستراتيجية
+bot.command('debug_fields', async (ctx: any) => {
+  let msg = '<b>STRATEGY_FIELDS:</b>\n';
+  msg += STRATEGY_FIELDS.map(f => `• <b>${f.label}</b> (<code>${f.key}</code>) [${f.type}]`).join('\n');
+  await ctx.reply(msg, { parse_mode: 'HTML' });
+});
 
 // Always reply to /start for any user (new or existing)
 bot.start(async (ctx: any) => {
@@ -85,22 +90,28 @@ bot.action('buy', async (ctx: any) => {
 });
 
 
+
 // === Set Strategy Button Handler (Wizard) ===
-const STRATEGY_FIELDS = [
-  { key: 'minVolume', label: 'Minimum Volume (USD)', type: 'number', optional: true },
-  { key: 'minHolders', label: 'Minimum Holders', type: 'number', optional: true },
-  { key: 'minAge', label: 'Minimum Age (minutes)', type: 'number', optional: true },
-  { key: 'minMarketCap', label: 'Minimum MarketCap (USD)', type: 'number', optional: true },
-  { key: 'maxAge', label: 'Maximum Age (minutes)', type: 'number', optional: true },
-  { key: 'onlyVerified', label: 'Only Verified Tokens?', type: 'boolean', optional: true },
-  { key: 'fastListing', label: 'Fast Listing Only?', type: 'boolean', optional: true },
-  { key: 'enabled', label: 'Enable Strategy?', type: 'boolean', optional: false },
-];
+// ...existing code...
 
-let strategyWizard: Record<string, { step: number, data: any }> = {};
+type StrategyWizardState = { step: number, data: any, isConfirm?: boolean };
+let strategyWizard: Record<string, StrategyWizardState> = {};
 
+
+// زر إلغاء المعالج
+bot.action('cancel_strategy', async (ctx: any) => {
+  const userId = String(ctx.from?.id);
+  delete strategyWizard[userId];
+  await ctx.answerCbQuery('Strategy setup cancelled.');
+  await ctx.reply('❌ Strategy setup cancelled.');
+  await sendMainMenu(ctx);
+});
+
+// بدء معالج الاستراتيجية
 bot.action('set_strategy', async (ctx: any) => {
   const userId = String(ctx.from?.id);
+  // جلب الحقول الديناميكية ودمجها قبل الثابتة
+
   strategyWizard[userId] = { step: 0, data: { ...((users[userId] && users[userId].strategy) || {}) } };
   await ctx.answerCbQuery();
   await askStrategyField(ctx, userId);
@@ -110,6 +121,13 @@ bot.on('text', async (ctx: any, next: any) => {
   const userId = String(ctx.from?.id);
   if (!strategyWizard[userId]) return next();
   const wizard = strategyWizard[userId];
+  // دعم الإلغاء بالنص
+  if (ctx.message.text.trim().toLowerCase() === 'cancel') {
+    delete strategyWizard[userId];
+    await ctx.reply('❌ Strategy setup cancelled.');
+    await sendMainMenu(ctx);
+    return;
+  }
   const field = STRATEGY_FIELDS[wizard.step];
   let value = ctx.message.text.trim();
   // Allow skip
@@ -118,7 +136,7 @@ bot.on('text', async (ctx: any, next: any) => {
   } else if (field.type === 'number') {
     const num = Number(value);
     if (isNaN(num)) {
-      await ctx.reply('❌ Please enter a valid number or type skip.');
+      await ctx.reply('❌ Please enter a valid number or type skip.', cancelKeyboard());
       return;
     }
     wizard.data[field.key] = num;
@@ -128,22 +146,32 @@ bot.on('text', async (ctx: any, next: any) => {
     } else if (['no', 'n', 'false', '❌'].includes(value.toLowerCase())) {
       wizard.data[field.key] = false;
     } else {
-      await ctx.reply('❌ Please answer with Yes or No.');
+      await ctx.reply('❌ Please answer with Yes or No.', cancelKeyboard());
       return;
     }
+  } else if (field.type === 'string') {
+    wizard.data[field.key] = value;
   }
   wizard.step++;
   if (wizard.step < STRATEGY_FIELDS.length) {
     await askStrategyField(ctx, userId);
   } else {
-    // Save strategy
-    users[userId].strategy = wizard.data;
-    saveUsers(users);
-    delete strategyWizard[userId];
-    await ctx.reply('✅ Your strategy has been updated and saved!');
-    await sendMainMenu(ctx);
+    // قبل الحفظ، أرسل ملخص الاستراتيجية واطلب التأكيد
+    strategyWizard[userId].isConfirm = true;
+    await ctx.reply('📝 Please review your strategy below. If all is correct, press Confirm. Otherwise, press Cancel.', {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Confirm', 'confirm_strategy'), Markup.button.callback('❌ Cancel', 'cancel_strategy')]
+      ])
+    });
+    await ctx.reply(formatStrategySummary(wizard.data), { parse_mode: 'HTML' });
   }
 });
+
+
+function cancelKeyboard() {
+  return Markup.keyboard([['Cancel']]).oneTime().resize();
+}
 
 async function askStrategyField(ctx: any, userId: string) {
   const wizard = strategyWizard[userId];
@@ -159,8 +187,46 @@ async function askStrategyField(ctx: any, userId: string) {
   if (current !== undefined) {
     msg += `\nCurrent: <code>${current}</code>`;
   }
-  await ctx.reply(msg, { parse_mode: 'HTML' });
+  msg += `\n<em>Type 'Cancel' anytime to exit.</em>`;
+  await ctx.reply(msg, { parse_mode: 'HTML', ...cancelKeyboard() });
 }
+
+// ملخص الاستراتيجية
+function formatStrategySummary(data: any): string {
+  let msg = '<b>Strategy Summary:</b>\n';
+  for (const field of STRATEGY_FIELDS) {
+    let val = data[field.key];
+    if (val === undefined) val = '<i>Not set</i>';
+    msg += `• <b>${field.label}:</b> <code>${val}</code>\n`;
+  }
+  return msg;
+}
+
+// تأكيد الاستراتيجية
+bot.action('confirm_strategy', async (ctx: any) => {
+  const userId = String(ctx.from?.id);
+  const wizard = strategyWizard[userId];
+  if (!wizard || !wizard.isConfirm) {
+    try {
+      await ctx.answerCbQuery('No strategy to confirm.');
+    } catch (e) {
+      console.warn('answerCbQuery failed (possibly expired):', e);
+    }
+    return;
+  }
+  // Ensure user is registered before setting strategy
+  const user = getOrRegisterUser(ctx);
+  user.strategy = wizard.data;
+  saveUsers(users);
+  delete strategyWizard[userId];
+  try {
+    await ctx.answerCbQuery('Strategy saved!');
+  } catch (e) {
+    console.warn('answerCbQuery failed (possibly expired):', e);
+  }
+  await ctx.reply('✅ Your strategy has been updated and saved!');
+  await sendMainMenu(ctx);
+});
 
 // === Honey Points Button Handler ===
 bot.action('honey_points', async (ctx: any) => {
@@ -272,8 +338,15 @@ setInterval(cleanupBoughtTokens, 60 * 60 * 1000); // Clean every hour
 
 // Placeholder: Replace with real token fetch logic (e.g., from dexscreener API or your own source)
 async function fetchUnifiedTokenList(): Promise<any[]> {
-  // TODO: Implement real token fetch logic here
-  return [];
+  // جلب العملات من DexScreener
+  const { fetchDexScreenerTokens } = await import('./utils/tokenUtils');
+  try {
+    const tokens = await fetchDexScreenerTokens();
+    return Array.isArray(tokens) ? tokens : [];
+  } catch (e) {
+    console.error('fetchUnifiedTokenList error:', e);
+    return [];
+  }
 }
 
 // Define addHoneyToken at top level
@@ -480,19 +553,40 @@ bot.action('show_tokens', async (ctx: any) => {
   await ctx.reply('🔄 Fetching latest tokens ...');
   try {
     let tokens = await getCachedTokenList();
+    console.log('show_tokens: tokens fetched:', Array.isArray(tokens) ? tokens.length : tokens);
     if (!tokens || tokens.length === 0) {
       await ctx.reply('No tokens found from the available sources. Please try again later.');
       return;
     }
-    // Show only the first 10 tokens
-    const sorted = tokens.slice(0, 10);
-    for (const [i, t] of sorted.entries()) {
-      let msg = formatTokenMsg(t, i);
-      await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    // فلترة العملات حسب استراتيجية المستخدم
+    const userId = String(ctx.from?.id);
+    const user = users[userId];
+    let filtered = tokens;
+    if (user && user.strategy) {
+      filtered = filterTokensByStrategy(tokens, user.strategy);
     }
-    await ctx.reply('Use the buttons below to refresh or interact.', {
-      reply_markup: { inline_keyboard: [[Markup.button.callback('Refresh', 'show_tokens')]] }
-    });
+    console.log('show_tokens: tokens after filter:', Array.isArray(filtered) ? filtered.length : filtered, 'strategy:', user && user.strategy);
+    if (!filtered || filtered.length === 0) {
+      await ctx.reply('No tokens match your strategy. Try adjusting your filters.');
+      return;
+    }
+    // عرض أول 10 عملات فقط بعد الفلترة، وتجاهل العملات الناقصة فعليًا
+    const sorted = filtered.slice(0, 20); // جرب 20 حتى لو بعضها ناقص
+    let sent = 0;
+    for (const t of sorted) {
+      let msg = buildTokenMessage(t, ctx.botInfo?.username || process.env.BOT_USERNAME || 'YourBotUsername', t.pairAddress || t.address || t.tokenAddress || '');
+      if (msg.includes('بيانات العملة غير متوفرة') || msg.includes('غير مكتملة')) continue;
+      await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+      sent++;
+      if (sent >= 10) break;
+    }
+    if (sent === 0) {
+      await ctx.reply('لا توجد عملات متاحة حالياً بمعاييرك أو من المصدر.');
+    } else {
+      await ctx.reply('Use the buttons below to refresh or interact.', {
+        reply_markup: { inline_keyboard: [[Markup.button.callback('Refresh', 'show_tokens')]] }
+      });
+    }
   } catch (e) {
     console.error('Error in show_tokens:', e);
     await ctx.reply('Error fetching tokens. Please try again later.');
