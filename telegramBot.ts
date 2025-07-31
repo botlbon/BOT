@@ -197,7 +197,10 @@ function formatStrategySummary(data: any): string {
   for (const field of STRATEGY_FIELDS) {
     let val = data[field.key];
     if (val === undefined) val = '<i>Not set</i>';
-    msg += `• <b>${field.label}:</b> <code>${val}</code>\n`;
+    // Special label for age
+    let label = field.label;
+    if (field.key === 'age') label = 'Minimum Age (minutes)';
+    msg += `• <b>${label}:</b> <code>${val}</code>\n`;
   }
   return msg;
 }
@@ -569,7 +572,21 @@ function formatTokenMsg(t: Record<string, any>, i: number): string {
   const priceUsd = formatNumber(t.priceUsd ?? t.price ?? t.priceNative);
   const marketCap = formatNumber(t.marketCap ?? t.fdv);
   const holders = formatNumber(t.holders);
-  const age = formatNumber(t.age);
+  // Calculate age in minutes if t.age is a timestamp (ms or s)
+  let age = '-';
+  if (t.age) {
+    let ageMs = t.age;
+    if (typeof ageMs === 'string') ageMs = Number(ageMs);
+    let ageVal: number | string = '-';
+    if (ageMs > 1e12) { // ms timestamp
+      ageVal = Math.floor((Date.now() - ageMs) / 60000);
+    } else if (ageMs > 1e9) { // s timestamp
+      ageVal = Math.floor((Date.now() - ageMs * 1000) / 60000);
+    } else if (ageMs < 1e7 && ageMs > 0) { // already in minutes
+      ageVal = ageMs;
+    }
+    age = formatNumber(ageVal);
+  }
   const verified = t.verified !== undefined ? t.verified : (t.baseToken?.verified !== undefined ? t.baseToken.verified : '-');
   const volume = formatNumber(t.volume ?? t.volume24h);
   const url = t.url || (t.pairAddress ? `https://dexscreener.com/solana/${t.pairAddress}` : '');
@@ -579,13 +596,13 @@ function formatTokenMsg(t: Record<string, any>, i: number): string {
     `MarketCap: ${marketCap}\n` +
     `Volume (24h): ${volume}\n` +
     `Holders: ${holders}\n` +
-    `Age (min): ${age}\n` +
+    `⏳ Age (minutes): ${age}\n` +
     `Verified: ${verified}`;
   if (url && url !== '-') msg += `\n<a href='${url}'>View on DexScreener</a>`;
   return msg;
 }
 
-// Show Tokens button handler
+// Show Tokens button handler (redesigned for clarity, accuracy, and sharing)
 bot.action('show_tokens', async (ctx: any) => {
   await ctx.reply('🔄 Fetching latest tokens ...');
   try {
@@ -595,11 +612,15 @@ bot.action('show_tokens', async (ctx: any) => {
       await ctx.reply('No tokens found from the available sources. Please try again later.');
       return;
     }
-    // فلترة العملات حسب استراتيجية المستخدم
+    // Filter tokens by user strategy (accurate numeric filtering)
     const userId = String(ctx.from?.id);
     const user = users[userId];
     let filtered = tokens;
+    // Ensure minHolders is 0 unless user explicitly set it
     if (user && user.strategy) {
+      if (user.strategy.minHolders === undefined || user.strategy.minHolders === null) {
+        user.strategy.minHolders = 0;
+      }
       filtered = filterTokensByStrategy(tokens, user.strategy);
     }
     console.log('show_tokens: tokens after filter:', Array.isArray(filtered) ? filtered.length : filtered, 'strategy:', user && user.strategy);
@@ -607,18 +628,43 @@ bot.action('show_tokens', async (ctx: any) => {
       await ctx.reply('No tokens match your strategy. Try adjusting your filters.');
       return;
     }
-    // عرض أول 10 عملات فقط بعد الفلترة، وتجاهل العملات الناقصة فعليًا
-    const sorted = filtered.slice(0, 20); // جرب 20 حتى لو بعضها ناقص
+    // Show up to 10 tokens, each in a separate message, with improved sharing/copy buttons
+    const sorted = filtered.slice(0, 20);
     let sent = 0;
     for (const t of sorted) {
+      // Build the token message (all fields, description, etc.)
       let msg = buildTokenMessage(t, ctx.botInfo?.username || process.env.BOT_USERNAME || 'YourBotUsername', t.pairAddress || t.address || t.tokenAddress || '');
-      if (msg.includes('بيانات العملة غير متوفرة') || msg.includes('غير مكتملة')) continue;
-      await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+      if (!msg || msg.includes('بيانات العملة غير متوفرة') || msg.includes('غير مكتملة')) continue;
+
+      // Build share/copy buttons
+      const tokenUrl = t.url || (t.pairAddress ? `https://dexscreener.com/solana/${t.pairAddress}` : '');
+      const botUsername = ctx.botInfo?.username || process.env.BOT_USERNAME || 'YourBotUsername';
+      const address = t.address || t.tokenAddress || t.pairAddress || '';
+      // Telegram share link (opens share dialog with token info)
+      const shareText = encodeURIComponent(`Check this token on Solana:\n${tokenUrl}`);
+      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(tokenUrl)}&text=${shareText}`;
+      // Copy link button (copies the bot deep link for this token)
+      const copyLink = `https://t.me/${botUsername}?start=${address}`;
+
+      // Inline keyboard: [View on DexScreener] [Share] [Copy Link]
+      const inlineKeyboard = [
+        [
+          tokenUrl ? { text: 'View on DexScreener', url: tokenUrl } : null,
+          { text: '🔗 Share Token', url: shareUrl },
+          { text: '📋 Copy Link', url: copyLink }
+        ].filter(Boolean)
+      ];
+
+      await ctx.reply(msg, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: false,
+        reply_markup: { inline_keyboard: inlineKeyboard }
+      });
       sent++;
       if (sent >= 10) break;
     }
     if (sent === 0) {
-      await ctx.reply('لا توجد عملات متاحة حالياً بمعاييرك أو من المصدر.');
+      await ctx.reply('No tokens available for your criteria or from the source.');
     } else {
       await ctx.reply('Use the buttons below to refresh or interact.', {
         reply_markup: { inline_keyboard: [[Markup.button.callback('Refresh', 'show_tokens')]] }
