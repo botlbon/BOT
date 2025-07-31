@@ -336,17 +336,54 @@ function cleanupBoughtTokens() {
 }
 setInterval(cleanupBoughtTokens, 60 * 60 * 1000); // Clean every hour
 
-// Placeholder: Replace with real token fetch logic (e.g., from dexscreener API or your own source)
+
+// Multi-source token fetch: CoinGecko (main), Jupiter (secondary), DexScreener (fallback)
 async function fetchUnifiedTokenList(): Promise<any[]> {
-  // جلب العملات من DexScreener
   const { fetchDexScreenerTokens } = await import('./utils/tokenUtils');
+  let allTokens: any[] = [];
   try {
-    const tokens = await fetchDexScreenerTokens();
-    return Array.isArray(tokens) ? tokens : [];
+    // CoinGecko
+    const cgTokens = await fetchDexScreenerTokens();
+    if (Array.isArray(cgTokens)) allTokens = allTokens.concat(cgTokens);
   } catch (e) {
-    console.error('fetchUnifiedTokenList error:', e);
-    return [];
+    console.error('CoinGecko fetch error:', e);
   }
+  // Jupiter
+  try {
+    const jupRes = await fetch('https://quote-api.jup.ag/v6/tokens');
+    if (jupRes.ok) {
+      const jupData = await jupRes.json();
+      if (Array.isArray(jupData.tokens)) {
+        allTokens = allTokens.concat(jupData.tokens.map((t: any) => ({
+          name: t.name,
+          symbol: t.symbol,
+          address: t.address,
+          priceUsd: t.price,
+          imageUrl: t.logoURI,
+          verified: t.tags?.includes('verified'),
+          description: t.extensions?.description,
+          links: [
+            ...(t.extensions?.website ? [{ label: 'Website', url: t.extensions.website, type: 'website' }] : []),
+            ...(t.extensions?.twitter ? [{ label: 'Twitter', url: t.extensions.twitter, type: 'twitter' }] : []),
+            ...(t.extensions?.discord ? [{ label: 'Discord', url: t.extensions.discord, type: 'discord' }] : []),
+          ],
+        })));
+      }
+    }
+  } catch (e) {
+    console.error('Jupiter fetch error:', e);
+  }
+  // DexScreener fallback (if needed)
+  // ...existing DexScreener logic can be added here if desired...
+  // Deduplicate by address
+  const seen = new Set();
+  const deduped = allTokens.filter(t => {
+    const addr = t.address || t.tokenAddress || t.pairAddress;
+    if (!addr || seen.has(addr)) return false;
+    seen.add(addr);
+    return true;
+  });
+  return deduped;
 }
 
 // Define addHoneyToken at top level

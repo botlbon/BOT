@@ -1,4 +1,3 @@
-// Simple filterTokensByStrategy implementation
 import type { Strategy } from './types';
 
 /**
