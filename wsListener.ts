@@ -34,14 +34,18 @@ function registerWsNotifications(bot: any, users: Record<string, any>) {
         // Limit number of tokens sent (e.g. first 10)
         const limitedTokens = userTokens.slice(0, 10);
         const botUsername = bot.botInfo?.username || process.env.BOT_USERNAME || 'YourBotUsername';
-        const msg = limitedTokens
-          .map(token => buildTokenMessage(token, botUsername, token.pairAddress || token.address || token.tokenAddress || ''))
-          .join('\n---------------------\n');
-        if (msg) {
-          try {
-            await bot.telegram.sendMessage(userId, msg, { parse_mode: 'HTML', disable_web_page_preview: false });
-          } catch (err) {
-            console.error(`Failed to send message to user ${userId}:`, err);
+        for (const token of limitedTokens) {
+          const { msg, inlineKeyboard } = buildTokenMessage(token, botUsername, token.pairAddress || token.address || token.tokenAddress || '');
+          if (msg && typeof msg === 'string') {
+            try {
+              await bot.telegram.sendMessage(userId, msg, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: false,
+                reply_markup: { inline_keyboard: inlineKeyboard }
+              });
+            } catch (err) {
+              console.error(`Failed to send message to user ${userId}:`, err);
+            }
           }
         }
       }

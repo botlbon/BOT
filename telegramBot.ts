@@ -534,9 +534,7 @@ bot.action('exportkey', async (ctx: any) => {
 });
 
 // Back to main menu button handler
-bot.action('back_to_menu', async (ctx: any) => {
-  await sendMainMenu(ctx);
-});
+// (تم حذف الكود الخاطئ الذي كان خارج أي دالة)
 
 // Send main menu
 async function sendMainMenu(ctx: any) {
@@ -632,29 +630,12 @@ bot.action('show_tokens', async (ctx: any) => {
     const sorted = filtered.slice(0, 20);
     let sent = 0;
     for (const t of sorted) {
-      // Build the token message (all fields, description, etc.)
-      let msg = buildTokenMessage(t, ctx.botInfo?.username || process.env.BOT_USERNAME || 'YourBotUsername', t.pairAddress || t.address || t.tokenAddress || '');
-      if (!msg || msg.includes('بيانات العملة غير متوفرة') || msg.includes('غير مكتملة')) continue;
-
-      // Build share/copy buttons
-      const tokenUrl = t.url || (t.pairAddress ? `https://dexscreener.com/solana/${t.pairAddress}` : '');
-      const botUsername = ctx.botInfo?.username || process.env.BOT_USERNAME || 'YourBotUsername';
-      const address = t.address || t.tokenAddress || t.pairAddress || '';
-      // Telegram share link (opens share dialog with token info)
-      const shareText = encodeURIComponent(`Check this token on Solana:\n${tokenUrl}`);
-      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(tokenUrl)}&text=${shareText}`;
-      // Copy link button (copies the bot deep link for this token)
-      const copyLink = `https://t.me/${botUsername}?start=${address}`;
-
-      // Inline keyboard: [View on DexScreener] [Share] [Copy Link]
-      const inlineKeyboard = [
-        [
-          tokenUrl ? { text: 'View on DexScreener', url: tokenUrl } : null,
-          { text: '🔗 Share Token', url: shareUrl },
-          { text: '📋 Copy Link', url: copyLink }
-        ].filter(Boolean)
-      ];
-
+      const { msg, inlineKeyboard } = buildTokenMessage(
+        t,
+        ctx.botInfo?.username || process.env.BOT_USERNAME || 'YourBotUsername',
+        t.pairAddress || t.address || t.tokenAddress || ''
+      );
+      if (!msg || typeof msg !== 'string' || msg.includes('بيانات العملة غير متوفرة') || msg.includes('غير مكتملة')) continue;
       await ctx.reply(msg, {
         parse_mode: 'HTML',
         disable_web_page_preview: false,
@@ -666,8 +647,8 @@ bot.action('show_tokens', async (ctx: any) => {
     if (sent === 0) {
       await ctx.reply('No tokens available for your criteria or from the source.');
     } else {
-      await ctx.reply('Use the buttons below to refresh or interact.', {
-        reply_markup: { inline_keyboard: [[Markup.button.callback('Refresh', 'show_tokens')]] }
+      await ctx.reply('', {
+        reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh', callback_data: 'show_tokens' }]] }
       });
     }
   } catch (e) {

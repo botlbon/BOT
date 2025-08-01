@@ -1,18 +1,31 @@
+// Smart field-specific formatting for token stats
+function fmtField(val: number | string | undefined | null, field: string): string {
+  if (val === undefined || val === null) return '-';
+  let num = typeof val === 'number' ? val : Number(val);
+  if (isNaN(num)) return String(val);
+  switch (field) {
+    case 'price':
+      if (Math.abs(num) >= 1) return num.toLocaleString(undefined, { maximumFractionDigits: 4 });
+      if (Math.abs(num) >= 0.01) return num.toLocaleString(undefined, { maximumFractionDigits: 6 });
+      return num.toLocaleString(undefined, { maximumFractionDigits: 8 });
+    case 'marketCap':
+    case 'liquidity':
+    case 'volume':
+      return num.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    case 'holders':
+    case 'age':
+      return Math.round(num).toLocaleString();
+    default:
+      return num.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+}
 import axios from 'axios';
-import { filterTokensByStrategy } from '../bot/strategy';
 import { Strategy } from '../bot/types';
-/**
- * Extract a field value from multiple sources, supports nested paths like 'baseToken.name'.
- * @param token Token object
- * @param fields List of fields to search for (supports paths like 'baseToken.name')
- * @returns First valid value found
- */
 
-
-// List of values considered empty or invalid
+// ========== General Constants ==========
 const EMPTY_VALUES = [undefined, null, '-', '', 'N/A', 'null', 'undefined'];
 
-// Map of essential fields for filtering (user-editable fields only)
+// Unified field map (easily extendable)
 const FIELD_MAP: Record<string, string[]> = {
   marketCap: [
     'marketCap', 'fdv', 'totalAmount', 'baseToken.marketCap', 'baseToken.fdv', 'baseToken.totalAmount',
@@ -41,21 +54,15 @@ const FIELD_MAP: Record<string, string[]> = {
   ]
 };
 
-// Log of missing fields (for debugging)
 const missingFieldsLog: Set<string> = new Set();
 
-/**
- * Extract a field value from an object with fallback and field mapping
- * Tries all possible paths, including nested, for robust extraction.
- * @param token Token object
- * @param fields List of fields (or unified name)
- * @returns First valid value or undefined
- */
+
+
+// Extract field value (supports nested paths)
 export function getField(token: any, ...fields: string[]): any {
   for (let f of fields) {
     const mapped = FIELD_MAP[f] || [f];
     for (const mf of mapped) {
-      // Try dot-path (nested)
       const path = mf.split('.');
       let val = token;
       for (const key of path) {
@@ -63,22 +70,19 @@ export function getField(token: any, ...fields: string[]): any {
         val = val[key];
       }
       if (!EMPTY_VALUES.includes(val)) return val;
-      // Try as direct property (for cases like 'liquidity.usd' as a flat key)
       if (mf in token && !EMPTY_VALUES.includes(token[mf])) return token[mf];
     }
   }
-  // Fallback: if any field is an object, extract first numeric value inside
+  // If the field is an object, extract the first numeric value
   for (let f of fields) {
     const mapped = FIELD_MAP[f] || [f];
     for (const mf of mapped) {
       let val = token[mf];
       if (typeof val === 'object' && val !== null) {
-        // If array, find first number
         if (Array.isArray(val)) {
           const num = val.find(v => typeof v === 'number' && !isNaN(v));
           if (num !== undefined) return num;
         } else {
-          // If object, find first number value
           for (const k in val) {
             if (typeof val[k] === 'number' && !isNaN(val[k])) return val[k];
           }
@@ -90,13 +94,20 @@ export function getField(token: any, ...fields: string[]): any {
   return undefined;
 }
 
-/**
- * General retry function for any async function
- * @param fn Function to execute
- * @param retries Number of attempts
- * @param delayMs Delay between attempts (ms)
- * @returns Result of the function or throws last error
- */
+// Extract a number from any value (helper)
+function extractNumeric(val: any, fallback?: number): number | undefined {
+  if (typeof val === 'number' && !isNaN(val)) return val;
+  if (typeof val === 'string' && !isNaN(Number(val))) return Number(val);
+  if (val && typeof val === 'object') {
+    for (const k of ['usd','h24','amount','value','total','native','sol']) {
+      if (typeof val[k] === 'number' && !isNaN(val[k])) return val[k];
+    }
+    for (const k in val) if (typeof val[k] === 'number' && !isNaN(val[k])) return val[k];
+  }
+  return fallback;
+}
+
+
 export async function retryAsync<T>(fn: () => Promise<T>, retries = 3, delayMs = 2000): Promise<T> {
   let lastErr;
   for (let i = 0; i < retries; i++) {
@@ -113,10 +124,7 @@ export async function retryAsync<T>(fn: () => Promise<T>, retries = 3, delayMs =
 }
 
 
-/**
- * Fetch Solana token details from CoinGecko
- * @returns {Promise<any>} Solana token object with all main fields
- */
+// ========== Fetch token data from CoinGecko and DexScreener ==========
 export async function fetchSolanaFromCoinGecko(): Promise<any> {
   const url = 'https://api.coingecko.com/api/v3/coins/solana';
   try {
@@ -150,7 +158,9 @@ export async function fetchSolanaFromCoinGecko(): Promise<any> {
   }
 }
 
-export { filterTokensByStrategy };
+
+// ========== User-editable fields (for strategies) ==========
+
 
 
 /**
@@ -167,11 +177,7 @@ export let STRATEGY_FIELDS: StrategyField[] = [
 ];
 
 
-// ========== DexScreener API Integration (NEW: /pairs endpoint) ========== //
-/**
- * Fetch Solana tokens from DexScreener /pairs API (returns richer data)
- */
-// Fetch token profiles (general info, links, images)
+// ========== DexScreener API Integration ==========
 export async function fetchDexScreenerProfiles(): Promise<any[]> {
   const url = 'https://api.dexscreener.com/token-profiles/latest/v1';
   try {
@@ -183,7 +189,6 @@ export async function fetchDexScreenerProfiles(): Promise<any[]> {
   }
 }
 
-// Fetch pairs (market data) from token-pairs for each Solana token
 export async function fetchDexScreenerPairsForSolanaTokens(tokenAddresses: string[]): Promise<any[]> {
   const chainId = 'solana';
   const allPairs: any[] = [];
@@ -201,10 +206,6 @@ export async function fetchDexScreenerPairsForSolanaTokens(tokenAddresses: strin
   return allPairs;
 }
 
-/**
- * Merge all public sources (CoinGecko and DexScreener) into a unified list
- * @returns {Promise<any[]>} Array of merged Solana tokens
- */
 export async function fetchDexScreenerTokens(): Promise<any[]> {
   // 1. Fetch all Solana tokens from token-profiles
   const profiles = await fetchDexScreenerProfiles();
@@ -321,64 +322,37 @@ export async function fetchDexScreenerTokens(): Promise<any[]> {
   return Object.values(allTokens);
 }
 
-/**
- * Format a number or string value for display
- * @param val Value to format
- * @param digits Number of decimal digits
- * @param unit Optional unit string
- * @returns {string} Formatted value
- */
-export function fmt(val: number | string | undefined | null, digits = 2, unit?: string): string {
+// ========== Formatting and display functions ==========
+export function fmt(val: number | string | undefined | null, digits?: number, unit?: string): string {
   if (val === undefined || val === null) return '-';
   let num = typeof val === 'number' ? val : Number(val);
   if (isNaN(num)) return String(val);
-  let str = num.toLocaleString(undefined, { maximumFractionDigits: digits });
+  let usedDigits = digits !== undefined ? digits : (Math.abs(num) < 1 ? 6 : 2);
+  let str = num.toLocaleString(undefined, { maximumFractionDigits: usedDigits });
   if (unit) str += ' ' + unit;
   return str;
 }
 
 
-/**
- * Build a visually appealing, dynamic, and shareable token message for Telegram
- * @param token Token object
- * @param botUsername Telegram bot username
- * @param pairAddress Token pair address
- * @returns {string} Formatted message
- */
-/**
- * Build a visually appealing, dynamic, and shareable token message for Telegram
- * Returns: { msg: string, inlineKeyboard: any[][] }
- */
-export function buildTokenMessage(token: any, botUsername: string, pairAddress: string, userId?: string): { msg: string, inlineKeyboard: any[][] } {
-  // --- Visually appealing, interactive, and community-friendly Solana/memecoin message ---
-  // 1. Core fields
-  const name = token.name || token.baseToken?.name || '';
-  const symbol = token.symbol || token.baseToken?.symbol || '';
-  const address = token.tokenAddress || token.address || token.mint || token.pairAddress || token.url?.split('/').pop() || '';
-  const dexUrl = token.url || (pairAddress ? `https://dexscreener.com/solana/${pairAddress}` : '');
-  const logo = token.imageUrl || token.logoURI || token.logo || token.baseToken?.logoURI || '';
-  // --- Robust extraction for numeric fields (liquidity, volume, etc.) ---
-  function extractNumeric(val: any, fallback?: number): number | undefined {
-    if (typeof val === 'number' && !isNaN(val)) return val;
-    if (typeof val === 'string' && !isNaN(Number(val))) return Number(val);
-    if (val && typeof val === 'object') {
-      for (const k of ['usd','h24','amount','value','total','native','sol']) {
-        if (typeof val[k] === 'number' && !isNaN(val[k])) return val[k];
-      }
-      for (const k in val) if (typeof val[k] === 'number' && !isNaN(val[k])) return val[k];
-    }
-    return fallback;
-  }
+
+// --- Helper functions for building the message ---
+function getTokenCoreFields(token: any) {
+  return {
+    name: token.name || token.baseToken?.name || '',
+    symbol: token.symbol || token.baseToken?.symbol || '',
+    address: token.tokenAddress || token.address || token.mint || token.pairAddress || token.url?.split('/').pop() || '',
+    dexUrl: token.url || (token.pairAddress ? `https://dexscreener.com/solana/${token.pairAddress}` : ''),
+    logo: token.imageUrl || token.logoURI || token.logo || token.baseToken?.logoURI || ''
+  };
+}
+
+function getTokenStats(token: any) {
   const price = extractNumeric(getField(token, 'priceUsd', 'price', 'baseToken.priceUsd', 'baseToken.price'), 0);
   const marketCap = extractNumeric(getField(token, 'marketCap'));
   const liquidity = extractNumeric(getField(token, 'liquidity'));
   const volume = extractNumeric(getField(token, 'volume'));
   const holders = extractNumeric(getField(token, 'holders'));
   let age = getField(token, 'age', 'genesis_date', 'pairCreatedAt');
-  // Buy/Sell Volumes if available
-  const buyVol = extractNumeric(token.buyVolume || token.buy_volume || token.volumeBuy || token.volume_buy);
-  const sellVol = extractNumeric(token.sellVolume || token.sell_volume || token.volumeSell || token.volume_sell);
-  // Age formatting
   let ageMinutes: number | string = '-';
   if (typeof age === 'string') age = Number(age);
   if (typeof age === 'number' && !isNaN(age)) {
@@ -386,101 +360,19 @@ export function buildTokenMessage(token: any, botUsername: string, pairAddress: 
     else if (age > 1e9) ageMinutes = Math.floor((Date.now() - age * 1000) / 60000);
     else if (age < 1e7 && age > 0) ageMinutes = age;
   }
+  return { price, marketCap, liquidity, volume, holders, ageMinutes };
+}
 
-  // 2. Visual/emoji enhancements (improved)
-  const solEmoji = '🟣';
-  const memecoinEmoji = '🚀';
-  const chartEmoji = '📈';
-  const capEmoji = '💰';
-  const liqEmoji = '💧';
-  const volEmoji = '🔊';
-  const holdersEmoji = '👥';
-  const ageEmoji = '⏱️';
-  const linkEmoji = '🔗';
-  const copyEmoji = '📋';
-  const buyEmoji = '🟢';
-  const twitterEmoji = '🐦';
-  const webEmoji = '🌐';
-  const tgEmoji = '💬';
-  const chartBtnEmoji = '📊';
-  const dexEmoji = '🧪';
+function getTokenBuySell(token: any) {
+  const buyVol = extractNumeric(token.buyVolume || token.buy_volume || token.volumeBuy || token.volume_buy);
+  const sellVol = extractNumeric(token.sellVolume || token.sell_volume || token.volumeSell || token.volume_sell);
+  return { buyVol, sellVol };
+}
 
-  // 3. Message header
-  let msg = '';
-  if (logo) {
-    msg += `<a href='${dexUrl}'><img src='${logo}' width='80' height='80'/></a>\n`;
-  }
-  msg += `<b>${solEmoji} ${name}${symbol ? ' <code>' + symbol + '</code>' : ''}</b>\n`;
-  msg += `<b>${linkEmoji} Address:</b> <code>${address}</code>\n`;
-
-  // 4. Main stats (row, improved formatting)
-  msg += `${capEmoji} <b>Market Cap:</b> ${fmt(marketCap, 2)} USD\n`;
-  // Liquidity Progress Bar
-  msg += `${liqEmoji} <b>Liquidity:</b> ${fmt(liquidity, 2)} USD  `;
-  if (liquidity !== undefined && marketCap && marketCap > 0) {
-    const liqPct = Math.min(100, Math.round((liquidity / marketCap) * 100));
-    msg += progressBar(liqPct, 10, '🟦', '⬜') + ` ${liqPct}%\n`;
-  } else {
-    msg += '\n';
-  }
-  // Volume Progress Bar
-  msg += `${volEmoji} <b>Volume 24h:</b> ${fmt(volume, 2)} USD  `;
-  if (volume !== undefined && marketCap && marketCap > 0) {
-    const volPct = Math.min(100, Math.round((volume / marketCap) * 100));
-    msg += progressBar(volPct, 10, '🟩', '⬜') + ` ${volPct}%\n`;
-  } else {
-    msg += '\n';
-  }
-  msg += `${holdersEmoji} <b>Holders:</b> ${fmt(holders, 0)}\n`;
-  msg += `${ageEmoji} <b>Age:</b> ${fmt(ageMinutes, 0, 'min')}\n`;
-  msg += `${chartEmoji} <b>Price:</b> ${fmt(price, 6)} USD\n`;
-
-  // Buy/Sell Volumes Progress
-  if (buyVol !== undefined || sellVol !== undefined) {
-    const totalVol = (buyVol || 0) + (sellVol || 0);
-    if (totalVol > 0) {
-      const buyPct = Math.round((buyVol || 0) / totalVol * 100);
-      const sellPct = 100 - buyPct;
-      msg += `🟢 Buy:  ${progressBar(buyPct, 10, '🟩', '⬜')} ${buyPct}%\n`;
-      msg += `🔴 Sell: ${progressBar(sellPct, 10, '🟥', '⬜')} ${sellPct}%\n`;
-    }
-  }
-
-  // 5. Show all other fields (auto, skip known/redundant, fix object/number display)
-  const skipFields = new Set(['name','baseToken','tokenAddress','address','mint','pairAddress','url','imageUrl','logoURI','logo','links','description','symbol','priceUsd','price','marketCap','liquidity','volume','holders','age','genesis_date','pairCreatedAt']);
-  for (const key of Object.keys(token)) {
-    if (skipFields.has(key)) continue;
-    let value = token[key];
-    if (value === undefined || value === null || value === '' || value === '-' || value === 'N/A' || value === 'null' || value === 'undefined') continue;
-    if (typeof value === 'number') {
-      msg += `<b>${key}:</b> ${fmt(value, 6)}\n`;
-    } else if (typeof value === 'string') {
-      // If looks like a URL to an image, show as image
-      if (/^https?:\/\/.*\.(png|jpg|jpeg|gif|webp)$/i.test(value)) {
-        msg += `<a href='${value}'><img src='${value}' width='60' height='60'/></a>\n`;
-      } else {
-        msg += `<b>${key}:</b> ${value}\n`;
-      }
-    } else if (typeof value === 'boolean') {
-      msg += `<b>${key}:</b> ${value ? '✅' : '❌'}\n`;
-    } else if (typeof value === 'object') {
-      // Try to extract a number for display
-      const numVal = extractNumeric(value);
-      if (numVal !== undefined) {
-        msg += `<b>${key}:</b> ${fmt(numVal, 6)}\n`;
-      } else if (Array.isArray(value) && value.every(v => typeof v === 'string')) {
-        msg += `<b>${key}:</b> ${value.join(', ')}\n`;
-      }
-    }
-  }
-
-  // 6. Description (if available)
-  if (token.description) msg += `\n<em>${token.description}</em>\n`;
-
-
-  // 7. Inline Keyboard Buttons (links)
+function buildInlineKeyboard(token: any, botUsername: string, pairAddress: string, userId?: string) {
+  const dexUrl = token.url || (pairAddress ? `https://dexscreener.com/solana/${pairAddress}` : '');
+  const webEmoji = '🌐', twitterEmoji = '🐦', tgEmoji = '💬', chartBtnEmoji = '📊', dexEmoji = '🧪', copyEmoji = '📋';
   const inlineKeyboard: any[][] = [];
-  // Row 1: DexScreener, Website, Twitter, Telegram
   const row1: any[] = [];
   if (dexUrl) row1.push({ text: `${dexEmoji} DexScreener`, url: dexUrl });
   if (Array.isArray(token.links)) {
@@ -491,41 +383,131 @@ export function buildTokenMessage(token: any, botUsername: string, pairAddress: 
     }
   }
   if (row1.length) inlineKeyboard.push(row1);
-  // Row 2: Chart, Share
   const row2: any[] = [];
   if (dexUrl) row2.push({ text: `${chartBtnEmoji} Chart`, url: dexUrl });
-  // Share link: use userId if provided, else address
-  let shareId = userId || token._userId || address;
+  let shareId = userId || token._userId || (token.tokenAddress || token.address || token.mint || token.pairAddress || '');
   const shareUrl = `https://t.me/${botUsername}?start=${shareId}`;
   row2.push({ text: `${copyEmoji} Share`, url: shareUrl });
   if (row2.length) inlineKeyboard.push(row2);
+  return { inlineKeyboard, shareUrl };
+}
 
-  // 8. Copy/share link (referral style, in message for clarity)
-  msg += `${copyEmoji} <b>Share Link:</b> <code>${shareUrl}</code>\n`;
+function buildExtraFields(token: any) {
+  // إضافة الحقول غير المفيدة إلى قائمة التجاهل
+  const skipFields = new Set([
+    'name','baseToken','tokenAddress','address','mint','pairAddress','url','imageUrl','logoURI','logo','links','description','symbol','priceUsd','price','marketCap','liquidity','volume','holders','age','genesis_date','pairCreatedAt',
+    'icon','header','openGraph' // الحقول غير المفيدة
+  ]);
+  let msg = '';
+  for (const key of Object.keys(token)) {
+    if (skipFields.has(key)) continue;
+    let value = token[key];
+    if (value === undefined || value === null || value === '' || value === '-' || value === 'N/A' || value === 'null' || value === 'undefined') continue;
+    if (typeof value === 'number') {
+      msg += `<b>${key}:</b> ${fmt(value, 6)}\n`;
+    } else if (typeof value === 'string') {
+      // لا تعرض أي روابط صور أو صور
+      if (/^https?:\/\/.*\.(png|jpg|jpeg|gif|webp)$/i.test(value)) {
+        continue;
+      } else if (/^https?:\/.*/.test(value)) {
+        // إذا كان رابط، اعرضه كرابط على رمز تعبيري فقط
+        msg += `<b>${key}:</b> <a href='${value}'>🔗</a>\n`;
+      } else {
+        msg += `<b>${key}:</b> ${value}\n`;
+      }
+    } else if (typeof value === 'boolean') {
+      msg += `<b>${key}:</b> ${value ? '✅' : '❌'}\n`;
+    } else if (typeof value === 'object') {
+      const numVal = extractNumeric(value);
+      if (numVal !== undefined) {
+        msg += `<b>${key}:</b> ${fmt(numVal, 6)}\n`;
+      } else if (Array.isArray(value) && value.every(v => typeof v === 'string')) {
+        msg += `<b>${key}:</b> ${value.join(', ')}\n`;
+      }
+    }
+  }
+  return msg;
+}
 
-  // 9. Community/visual footer
+export function buildTokenMessage(token: any, botUsername: string, pairAddress: string, userId?: string): { msg: string, inlineKeyboard: any[][] } {
+  const { name, symbol, address, dexUrl, logo } = getTokenCoreFields(token);
+  const { price, marketCap, liquidity, volume, holders, ageMinutes } = getTokenStats(token);
+  const { buyVol, sellVol } = getTokenBuySell(token);
+  // --- Emojis ---
+  const solEmoji = '🟣', memecoinEmoji = '🚀', chartEmoji = '📈', capEmoji = '💰', liqEmoji = '💧', volEmoji = '🔊', holdersEmoji = '👥', ageEmoji = '⏱️', linkEmoji = '🔗';
+  // --- Message header ---
+  let msg = '';
+  // فقط رمز تعبيري للعملة (بدون صورة أو رابط صورة)
+  msg += `🪙`;
+  msg += `<b>${solEmoji} ${name}${symbol ? ' <code>' + symbol + '</code>' : ''}</b>\n`;
+  msg += `<b>${linkEmoji} Address:</b> <code>${address}</code>\n`;
+  // --- الإحصائيات ---
+  msg += `${capEmoji} <b>Market Cap:</b> ${fmtField(marketCap, 'marketCap')} USD\n`;
+  msg += `${liqEmoji} <b>Liquidity:</b> ${fmtField(liquidity, 'liquidity')} USD  `;
+  if (liquidity !== undefined && marketCap && marketCap > 0) {
+    const liqPct = Math.min(100, Math.round((liquidity / marketCap) * 100));
+    msg += progressBar(liqPct, 10, '🟦', '⬜') + ` ${liqPct}%\n`;
+  } else {
+    msg += '\n';
+  }
+  msg += `${volEmoji} <b>Volume 24h:</b> ${fmtField(volume, 'volume')} USD  `;
+  if (volume !== undefined && marketCap && marketCap > 0) {
+    const volPct = Math.min(100, Math.round((volume / marketCap) * 100));
+    msg += progressBar(volPct, 10, '🟩', '⬜') + ` ${volPct}%\n`;
+  } else {
+    msg += '\n';
+  }
+  msg += `${holdersEmoji} <b>Holders:</b> ${fmtField(holders, 'holders')}\n`;
+  msg += `${ageEmoji} <b>Age:</b> ${fmtField(ageMinutes, 'age')} min\n`;
+  msg += `${chartEmoji} <b>Price:</b> ${fmtField(price, 'price')} USD\n`;
+  // --- Buy/Sell progress bar ---
+  if (buyVol !== undefined || sellVol !== undefined) {
+    const totalVol = (buyVol || 0) + (sellVol || 0);
+    if (totalVol > 0) {
+      const buyPct = Math.round((buyVol || 0) / totalVol * 100);
+      const sellPct = 100 - buyPct;
+      msg += `🟢 Buy:  ${progressBar(buyPct, 10, '🟩', '⬜')} ${buyPct}%\n`;
+      msg += `🔴 Sell: ${progressBar(sellPct, 10, '🟥', '⬜')} ${sellPct}%\n`;
+    }
+  }
+  // --- Extra fields ---
+  msg += buildExtraFields(token);
+  // --- Description ---
+  if (token.description) msg += `\n<em>${token.description}</em>\n`;
+
+  // --- روابط العملة الفعلية بشكل احترافي في سطر منفصل أسفل الرسالة ---
+  let linksBlock = '';
+
+  if (Array.isArray(token.links)) {
+    for (const l of token.links) {
+      if (l.type === 'website' && l.url) linksBlock += `<a href='${l.url}'>🌐</a> `;
+      if (l.type === 'twitter' && l.url) linksBlock += `<a href='${l.url}'>🐦</a> `;
+      if (l.type === 'telegram' && l.url) linksBlock += `<a href='${l.url}'>💬</a> `;
+      if (l.type === 'reddit' && l.url) linksBlock += `<a href='${l.url}'>👽</a> `;
+    }
+  }
+  if (dexUrl) linksBlock += `<a href='${dexUrl}'>🧪</a> `;
+  if (linksBlock) msg += `\n${linksBlock.trim()}\n`;
+
+  // --- زر مشاركة احترافي في سطر منفصل أسفل الرسالة ---
+  const { inlineKeyboard, shareUrl } = buildInlineKeyboard(token, botUsername, pairAddress, userId);
+  msg += `\n<a href='${shareUrl}'>📋</a>\n`;
+
   msg += `\n${memecoinEmoji} <b>Solana Memecoin Community</b> | ${solEmoji} <b>Powered by DexScreener</b>\n`;
   return { msg, inlineKeyboard };
 }
 
-// Helper: Progress bar as text
+
 function progressBar(percent: number, size = 10, fill = '█', empty = '░') {
   const filled = Math.round((percent / 100) * size);
   return fill.repeat(filled) + empty.repeat(size - filled);
 }
-}
 
-/**
- * Notify users with filtered tokens and interactive keyboard
- * @param bot Telegram bot instance
- * @param users Users object
- * @param tokens Array of tokens
- */
+
+// Notify users with matching tokens (always uses autoFilterTokens)
 export async function notifyUsers(bot: any, users: Record<string, any>, tokens: any[]) {
   for (const uid of Object.keys(users)) {
-    // Always use the user's real strategy
     const strategy: Strategy = users[uid]?.strategy || {};
-    // Use robust autoFilterTokens for filtering
     const filtered = autoFilterTokens(tokens, strategy);
     if (filtered.length > 0 && bot) {
       for (const token of filtered) {
@@ -534,21 +516,12 @@ export async function notifyUsers(bot: any, users: Record<string, any>, tokens: 
         let botUsername = (bot && bot.botInfo && bot.botInfo.username) ? bot.botInfo.username : (process.env.BOT_USERNAME || 'YourBotUsername');
         const address = token.tokenAddress || token.address || token.mint || token.pairAddress || 'N/A';
         const pairAddress = token.pairAddress || address;
-        const msg = buildTokenMessage(token, botUsername, pairAddress);
-        const inlineKeyboard = [
-          [
-            { text: '🟢 Buy', url: `${process.env.DEXSCREENER_BASE_URL || 'https://dexscreener.com/solana'}/${pairAddress}` },
-            { text: '👁️ Watch', url: `${process.env.DEXSCREENER_BASE_URL || 'https://dexscreener.com/solana'}/${pairAddress}` },
-            { text: '📈 View Chart', url: `${process.env.DEXSCREENER_BASE_URL || 'https://dexscreener.com/solana'}/${pairAddress}` }
-          ],
-          [
-            { text: '⚙️ Edit Settings', callback_data: `edit_settings_${uid}` },
-            { text: '🆕 New Only', callback_data: `new_only_${uid}` },
-            { text: '⏹️ Stop Strategy', callback_data: `stop_strategy_${uid}` },
-            { text: '▶️ Start Strategy', callback_data: `start_strategy_${uid}` },
-            { text: '🔙 Back', callback_data: `back_${uid}` }
-          ]
-        ];
+        const { msg, inlineKeyboard } = buildTokenMessage(token, botUsername, pairAddress);
+        // Extra protection: if msg is not a string, skip sending
+        if (typeof msg !== 'string') {
+          await bot.telegram.sendMessage(uid, '⚠️ We are still looking for the gems you want.');
+          continue;
+        }
         await bot.telegram.sendMessage(uid, msg, {
           parse_mode: 'HTML',
           disable_web_page_preview: false,
@@ -558,7 +531,7 @@ export async function notifyUsers(bot: any, users: Record<string, any>, tokens: 
     } else if (bot) {
       await bot.telegram.sendMessage(
         uid,
-        'لا توجد عملات مطابقة لاستراتيجيتك حالياً.\n\nقد تكون شروط الاستراتيجية صارمة جداً بالنسبة للبيانات المتاحة من DexScreener.\n\nجرب تقليل القيم المطلوبة مثل السيولة أو القيمة السوقية أو الحجم أو العمر أو عدد الحاملين، ثم أعد المحاولة.',
+        'No tokens currently match your strategy.\n\nYour strategy filters may be too strict for the available data from DexScreener.\n\nTry lowering requirements like liquidity, market cap, volume, age, or holders, then try again.',
         {
           parse_mode: 'HTML',
           disable_web_page_preview: true
@@ -569,21 +542,15 @@ export async function notifyUsers(bot: any, users: Record<string, any>, tokens: 
 }
 
 
-/**
- * Auto-filter tokens based on strategy settings and STRATEGY_FIELDS
- * Uses robust getField for all field extraction
- * @param tokens List of tokens
- * @param strategy Filtering settings
- * @returns Filtered list of tokens
- */
+// Unified token filtering by strategy
 export function autoFilterTokens(tokens: any[], strategy: Record<string, any>): any[] {
   return tokens.filter(token => {
     for (const field of STRATEGY_FIELDS) {
       if (!field.tokenField || !(field.key in strategy)) continue;
-      if (["buyAmount", "minPrice", "maxPrice"].includes(field.key)) continue;
       const value = strategy[field.key];
       if (field.type === "number" && (value === undefined || value === null || Number(value) === 0)) continue;
       let tokenValue = getField(token, field.tokenField);
+      // Special cases support
       if (field.tokenField === 'liquidity' && tokenValue && typeof tokenValue === 'object' && typeof tokenValue.usd === 'number') {
         tokenValue = tokenValue.usd;
       }
