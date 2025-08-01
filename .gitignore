@@ -1,3 +1,4 @@
 .env
 users.json
+sent_tokens
 node_modules

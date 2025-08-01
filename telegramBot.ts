@@ -1,3 +1,7 @@
+// --- Sent Tokens Rotating File System ---
+
+import crypto from 'crypto';
+import path from 'path';
 
 import dotenv from 'dotenv';
 dotenv.config();
@@ -274,6 +278,97 @@ bot.action('invite_friends', async (ctx: any) => {
 
 // Telegram bot core variables
 let users: Record<string, any> = loadUsers();
+
+// --- Sent Tokens Rotating File System ---
+const SENT_TOKENS_DIR = path.join(__dirname, 'sent_tokens');
+const MAX_FILE_COUNT = 3;
+const MAX_HASHES_PER_FILE = 2000;
+const ROTATE_CLEAN_THRESHOLD = Math.floor(MAX_HASHES_PER_FILE * 1.5);
+
+// Ensure sent_tokens directory exists at startup
+try {
+  if (!fs.existsSync(SENT_TOKENS_DIR)) fs.mkdirSync(SENT_TOKENS_DIR);
+} catch (e) {
+  console.error('❌ Failed to create sent_tokens directory:', e);
+}
+
+function getUserSentFiles(userId: string) {
+  return Array.from({ length: MAX_FILE_COUNT }, (_, i) => path.join(SENT_TOKENS_DIR, `${userId}_${i+1}.json`));
+}
+
+
+export function hashTokenAddress(addr: string): string {
+  // توحيد العنوان: lowercase + trim
+  return crypto.createHash('sha256').update(addr.trim().toLowerCase()).digest('hex');
+}
+
+export function readSentHashes(userId: string): Set<string> {
+  const files = getUserSentFiles(userId);
+  let hashes: string[] = [];
+  for (const file of files) {
+    try {
+      if (fs.existsSync(file)) {
+        const arr = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (Array.isArray(arr)) hashes = hashes.concat(arr);
+        console.log(`[sent_tokens] Read ${arr.length} hashes from ${file}`);
+      }
+    } catch (e) {
+      console.warn(`[sent_tokens] Failed to read ${file}:`, e);
+    }
+  }
+  return new Set(hashes);
+}
+
+export function appendSentHash(userId: string, hash: string) {
+  const files = getUserSentFiles(userId);
+  let fileIdx = 0;
+  for (let i = 0; i < files.length; i++) {
+    try {
+      let arr: string[] = [];
+      if (fs.existsSync(files[i])) {
+        arr = JSON.parse(fs.readFileSync(files[i], 'utf8'));
+        if (arr.includes(hash)) {
+          console.log(`[sent_tokens] Hash already exists in ${files[i]}`);
+          return;
+        }
+      }
+      if (arr.length < MAX_HASHES_PER_FILE) {
+        arr.push(hash);
+        fs.writeFileSync(files[i], JSON.stringify(arr));
+        console.log(`[sent_tokens] Appended hash to ${files[i]} (${arr.length})`);
+        return;
+      }
+    } catch (e) {
+      console.warn(`[sent_tokens] Failed to write ${files[i]}:`, e);
+    }
+    fileIdx = i;
+  }
+  // If all full, rotate: overwrite the oldest
+  let arr: string[] = [hash];
+  fs.writeFileSync(files[fileIdx], JSON.stringify(arr));
+  console.log(`[sent_tokens] Rotated and started new ${files[fileIdx]}`);
+}
+
+function rotateAndCleanIfNeeded(userId: string) {
+  const files = getUserSentFiles(userId);
+  let total = 0;
+  let arrs: string[][] = [];
+  for (const file of files) {
+    let arr: string[] = [];
+    try {
+      if (fs.existsSync(file)) arr = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {}
+    arrs.push(arr);
+    total += arr.length;
+  }
+  if (arrs[2] && arrs[2].length >= Math.floor(MAX_HASHES_PER_FILE/2)) {
+    for (let i = 0; i < 2; i++) {
+      try { fs.unlinkSync(files[i]); console.log(`[sent_tokens] Cleaned ${files[i]}`); } catch (e) { console.warn(`[sent_tokens] Failed to clean ${files[i]}:`, e); }
+    }
+  }
+}
+
+
 
 // Register strategy handlers and token notifications from wsListener (after users is defined)
 
@@ -602,59 +697,173 @@ function formatTokenMsg(t: Record<string, any>, i: number): string {
 
 // Show Tokens button handler (redesigned for clarity, accuracy, and sharing)
 bot.action('show_tokens', async (ctx: any) => {
-  await ctx.reply('🔄 Fetching latest tokens ...');
+  await ctx.reply('🔄 جاري جلب أحدث التوكنات ...');
   try {
-    let tokens = await getCachedTokenList();
-    console.log('show_tokens: tokens fetched:', Array.isArray(tokens) ? tokens.length : tokens);
+    // كاش مخصص لكل مستخدم (تحسين الأداء)
+    const userId = String(ctx.from?.id);
+    ctx.session = ctx.session || {};
+    if (!ctx.session.tokenCache) ctx.session.tokenCache = { tokens: [], last: 0 };
+    const now = Date.now();
+    let tokens: any[] = [];
+    if (ctx.session.tokenCache.tokens.length === 0 || now - ctx.session.tokenCache.last > CACHE_TTL) {
+      tokens = await getCachedTokenList();
+      ctx.session.tokenCache.tokens = tokens;
+      ctx.session.tokenCache.last = now;
+    } else {
+      tokens = ctx.session.tokenCache.tokens;
+    }
     if (!tokens || tokens.length === 0) {
-      await ctx.reply('No tokens found from the available sources. Please try again later.');
+      await ctx.reply('❌ لم يتم العثور على توكنات متاحة حاليًا. حاول لاحقًا.');
       return;
     }
-    // Filter tokens by user strategy (accurate numeric filtering)
-    const userId = String(ctx.from?.id);
+    // Ignore blocked users
     const user = users[userId];
+    if (user && user.blocked) {
+      await ctx.reply('❌ You have blocked the bot.');
+      return;
+    }
     let filtered = tokens;
-    // Ensure minHolders is 0 unless user explicitly set it
+    let strategyLog = '';
     if (user && user.strategy) {
       if (user.strategy.minHolders === undefined || user.strategy.minHolders === null) {
         user.strategy.minHolders = 0;
       }
       filtered = filterTokensByStrategy(tokens, user.strategy);
+      strategyLog = JSON.stringify(user.strategy);
     }
-    console.log('show_tokens: tokens after filter:', Array.isArray(filtered) ? filtered.length : filtered, 'strategy:', user && user.strategy);
+    // لوج: عناوين العملات بعد الفلترة
+    const filteredAddresses = filtered.map(t => (t.address || t.tokenAddress || t.pairAddress || '').trim().toLowerCase());
+    console.log(`[show_tokens] User ${userId} | strategy: ${strategyLog} | tokens: ${tokens.length}, filtered: ${filtered.length}`);
+    console.log(`[show_tokens] User ${userId} | filtered addresses:`, filteredAddresses);
     if (!filtered || filtered.length === 0) {
-      await ctx.reply('No tokens match your strategy. Try adjusting your filters.');
+      await ctx.reply('❌ لا توجد توكنات تطابق استراتيجيتك. جرب تعديل الفلاتر.');
       return;
     }
-    // Show up to 10 tokens, each in a separate message, with improved sharing/copy buttons
-    const sorted = filtered.slice(0, 20);
+    if (!fs.existsSync(SENT_TOKENS_DIR)) fs.mkdirSync(SENT_TOKENS_DIR);
+    const sentHashes = readSentHashes(userId);
+    // لوج: محتوى sentHashes
+    console.log(`[show_tokens] User ${userId} | sentHashes:`, Array.from(sentHashes));
+    const uniqueFiltered = filtered.filter(t => {
+      const addr = t.address || t.tokenAddress || t.pairAddress;
+      if (!addr) return false;
+      const h = hashTokenAddress(addr);
+      return !sentHashes.has(h);
+    });
+    // لوج: عناوين العملات الفريدة بعد sent_tokens
+    const uniqueAddresses = uniqueFiltered.map(t => (t.address || t.tokenAddress || t.pairAddress || '').trim().toLowerCase());
+    console.log(`[show_tokens] User ${userId} | unique tokens after sent_tokens: ${uniqueFiltered.length}`);
+    console.log(`[show_tokens] User ${userId} | unique addresses:`, uniqueAddresses);
+    if (!uniqueFiltered || uniqueFiltered.length === 0) {
+      await ctx.reply('✅ لقد شاهدت كل التوكنات الجديدة المتاحة حاليًا. انتظر تحديثات جديدة أو اضغط تحديث لاحقًا.');
+      return;
+    }
+
+// أمر إداري: تدوير ملفات sent_tokens يدويًا (حذف أقدم ملف فقط)
+// للاستخدام من المطور فقط (مثلاً عبر معرف المستخدم)
+const ADMIN_IDS = [process.env.ADMIN_ID || '123456789']; // ضع معرف المطور هنا أو في المتغيرات البيئية
+bot.command('rotate_sent_tokens', async (ctx: any) => {
+  const userId = String(ctx.from?.id);
+  if (!ADMIN_IDS.includes(userId)) {
+    await ctx.reply('❌ هذا الأمر مخصص للمطور فقط.');
+    return;
+  }
+  const targetId = ctx.message.text.split(' ')[1] || userId;
+  const files = getUserSentFiles(targetId);
+  if (fs.existsSync(files[0])) {
+    try {
+      fs.unlinkSync(files[0]);
+      await ctx.reply(`✅ تم حذف أقدم ملف sent_tokens (${path.basename(files[0])}) للمستخدم ${targetId}.`);
+    } catch (e) {
+      await ctx.reply(`❌ فشل حذف الملف: ${e}`);
+    }
+  } else {
+    await ctx.reply('لا يوجد ملف sent_tokens أقدم للحذف.');
+  }
+});
+    // Show up to 10 tokens per page, with "more" button
+    const page = ctx.session.page || 0;
+    const pageSize = 10;
+    const start = page * pageSize;
+    const sorted = uniqueFiltered.slice(start, start + pageSize);
     let sent = 0;
     for (const t of sorted) {
+      const addr = t.address || t.tokenAddress || t.pairAddress;
       const { msg, inlineKeyboard } = buildTokenMessage(
         t,
         ctx.botInfo?.username || process.env.BOT_USERNAME || 'YourBotUsername',
         t.pairAddress || t.address || t.tokenAddress || ''
       );
       if (!msg || typeof msg !== 'string' || msg.includes('بيانات العملة غير متوفرة') || msg.includes('غير مكتملة')) continue;
-      await ctx.reply(msg, {
-        parse_mode: 'HTML',
-        disable_web_page_preview: false,
-        reply_markup: { inline_keyboard: inlineKeyboard }
-      });
-      sent++;
-      if (sent >= 10) break;
+      try {
+        await ctx.reply(msg, {
+          parse_mode: 'HTML',
+          disable_web_page_preview: false,
+          reply_markup: { inline_keyboard: inlineKeyboard }
+        });
+        if (addr) {
+          const h = hashTokenAddress(addr);
+          appendSentHash(userId, h);
+          rotateAndCleanIfNeeded(userId);
+          console.log(`[show_tokens] User ${userId} sent token: ${addr} (hash: ${h})`);
+        }
+        sent++;
+      } catch (err) {
+        // Detect if user blocked the bot
+        if ((err as any)?.description?.includes('bot was blocked by the user')) {
+          if (user) {
+            user.blocked = true;
+            saveUsers(users);
+            console.warn(`[show_tokens] User ${userId} blocked the bot. Skipping.`);
+          }
+          break;
+        }
+        console.warn(`[show_tokens] Failed to send token to user ${userId}:`, err);
+        // Don't append hash if sending failed
+      }
     }
+    // Navigation buttons: more/refresh
+    const hasMore = uniqueFiltered.length > start + pageSize;
+    const navButtons = [];
+    if (hasMore) navButtons.push({ text: '➡️ المزيد', callback_data: 'show_tokens_more' });
+    navButtons.push({ text: '🔄 تحديث', callback_data: 'show_tokens' });
     if (sent === 0) {
-      await ctx.reply('No tokens available for your criteria or from the source.');
+      await ctx.reply('❌ لا توجد توكنات متاحة للعرض.');
     } else {
-      await ctx.reply('', {
-        reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh', callback_data: 'show_tokens' }]] }
+      await ctx.reply('اختر إجراء:', {
+        reply_markup: { inline_keyboard: [navButtons] }
       });
+    }
+    // Only reset page if user pressed refresh
+    if (ctx.session._resetPage) {
+      ctx.session.page = 0;
+      ctx.session._resetPage = false;
     }
   } catch (e) {
     console.error('Error in show_tokens:', e);
-    await ctx.reply('Error fetching tokens. Please try again later.');
+    await ctx.reply('❌ حدث خطأ أثناء جلب التوكنات. حاول لاحقًا.');
   }
+});
+
+// زر المزيد (pagination)
+bot.action('show_tokens_more', async (ctx: any) => {
+  ctx.session = ctx.session || {};
+  ctx.session.page = (ctx.session.page || 0) + 1;
+  await ctx.answerCbQuery();
+  try {
+    await ctx.deleteMessage();
+  } catch {}
+  // Call the show_tokens handler directly to show the next page
+  await bot.handleUpdate({
+    ...ctx.update,
+    callback_query: { ...ctx.callbackQuery, data: 'show_tokens' }
+  }, ctx);
+});
+
+// Refresh button handler: resets pagination
+bot.action('show_tokens', async (ctx: any, next: any) => {
+  ctx.session = ctx.session || {};
+  ctx.session._resetPage = true;
+  if (typeof next === 'function') await next();
 });
 
 // ====== User, wallet, and menu helper functions ======
