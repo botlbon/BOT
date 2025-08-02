@@ -1,3 +1,40 @@
+// Parse any key type: base58, base64, hex, mnemonic, or JSON array
+import bs58 from 'bs58';
+import nacl from 'tweetnacl';
+import { mnemonicToSeedSync } from 'bip39';
+
+export function parseKey(input: string): any {
+  // Try JSON array
+  if (input.trim().startsWith('[')) {
+    return loadKeypair(input);
+  }
+  // Try base64
+  try {
+    const buf = Buffer.from(input, 'base64');
+    if (buf.length === 64) return Keypair.fromSecretKey(buf);
+  } catch {}
+  // Try base58
+  try {
+    const buf = bs58.decode(input);
+    if (buf.length === 64) return Keypair.fromSecretKey(buf);
+  } catch {}
+  // Try hex
+  try {
+    if (/^[0-9a-fA-F]+$/.test(input) && input.length === 128) {
+      const buf = Buffer.from(input, 'hex');
+      return Keypair.fromSecretKey(buf);
+    }
+  } catch {}
+  // Try mnemonic (BIP39)
+  try {
+    if (input.split(' ').length >= 12) {
+      const seed = mnemonicToSeedSync(input.trim());
+      const key = nacl.sign.keyPair.fromSeed(seed.slice(0, 32));
+      return Keypair.fromSecretKey(Buffer.from(key.secretKey));
+    }
+  } catch {}
+  throw new Error('Invalid key format. Supported: base58, base64, hex, mnemonic, JSON array.');
+}
 import { Keypair, Connection, clusterApiUrl } from '@solana/web3.js';
 
 // Load a keypair from an array, Uint8Array, or base64/JSON string

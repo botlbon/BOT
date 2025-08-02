@@ -1,6 +1,6 @@
 // Smart field-specific formatting for token stats
 function fmtField(val: number | string | undefined | null, field: string): string {
-  if (val === undefined || val === null) return '-';
+  if (val === undefined || val === null || val === '-' || val === '' || val === 'N/A' || val === 'null' || val === 'undefined') return 'Not available';
   let num = typeof val === 'number' ? val : Number(val);
   if (isNaN(num)) return String(val);
   switch (field) {
@@ -173,7 +173,14 @@ export let STRATEGY_FIELDS: StrategyField[] = [
   { key: 'minLiquidity', label: 'Minimum Liquidity (USD)', type: 'number', optional: false, tokenField: 'liquidity' },
   { key: 'minVolume', label: 'Minimum Volume (24h USD)', type: 'number', optional: false, tokenField: 'volume' },
   { key: 'minHolders', label: 'Minimum Holders', type: 'number', optional: true, tokenField: 'holders' },
-  { key: 'minAge', label: 'Minimum Age (minutes)', type: 'number', optional: false, tokenField: 'age' }
+  { key: 'minAge', label: 'Minimum Age (minutes)', type: 'number', optional: false, tokenField: 'age' },
+  { key: 'buyAmount', label: 'Buy Amount (SOL)', type: 'number', optional: false },
+  { key: 'sellPercent1', label: 'First Sell Percent (%)', type: 'number', optional: false },
+  { key: 'profitTarget1', label: 'First Profit Target (%)', type: 'number', optional: false },
+  { key: 'sellPercent2', label: 'Second Sell Percent (%)', type: 'number', optional: true },
+  { key: 'profitTarget2', label: 'Second Profit Target (%)', type: 'number', optional: true },
+  { key: 'stopLossPercent', label: 'Stop Loss (%)', type: 'number', optional: false },
+  { key: 'maxActiveTrades', label: 'Max Active Trades', type: 'number', optional: false }
 ];
 
 
@@ -336,6 +343,30 @@ export function fmt(val: number | string | undefined | null, digits?: number, un
 
 
 // --- Helper functions for building the message ---
+
+function buildInlineKeyboard(token: any, botUsername: string, pairAddress: string, userId?: string) {
+  const dexUrl = token.url || (pairAddress ? `https://dexscreener.com/solana/${pairAddress}` : '');
+  const twitterEmoji = '🐦', dexEmoji = '🧪', shareEmoji = '📤';
+  const inlineKeyboard: any[][] = [];
+  // Row 1: Twitter, DexScreener (only if available)
+  const row1: any[] = [];
+  if (Array.isArray(token.links)) {
+    for (const l of token.links) {
+      if (l.type === 'twitter' && l.url) row1.push({ text: `${twitterEmoji} Twitter`, url: l.url });
+    }
+  }
+  if (dexUrl) row1.push({ text: `${dexEmoji} DexScreener`, url: dexUrl });
+  if (row1.length) inlineKeyboard.push(row1);
+  // Row 2: Share button (external share link)
+  let shareId = userId || token._userId || (token.tokenAddress || token.address || token.mint || token.pairAddress || '');
+  // External share link (Telegram deep link with share parameter)
+  const shareUrl = `https://t.me/share/url?url=https://t.me/${botUsername}?start=${shareId}`;
+  const row2: any[] = [ { text: `${shareEmoji} Share`, url: shareUrl } ];
+  inlineKeyboard.push(row2);
+  return { inlineKeyboard };
+}
+
+// --- Helper functions for building the message ---
 function getTokenCoreFields(token: any) {
   return {
     name: token.name || token.baseToken?.name || '',
@@ -353,14 +384,33 @@ function getTokenStats(token: any) {
   const volume = extractNumeric(getField(token, 'volume'));
   const holders = extractNumeric(getField(token, 'holders'));
   let age = getField(token, 'age', 'genesis_date', 'pairCreatedAt');
-  let ageMinutes: number | string = '-';
+  let ageDisplay: string = 'Not available';
+  let ageMs = undefined;
   if (typeof age === 'string') age = Number(age);
   if (typeof age === 'number' && !isNaN(age)) {
-    if (age > 1e12) ageMinutes = Math.floor((Date.now() - age) / 60000);
-    else if (age > 1e9) ageMinutes = Math.floor((Date.now() - age * 1000) / 60000);
-    else if (age < 1e7 && age > 0) ageMinutes = age;
+    if (age > 1e12) ageMs = Date.now() - age; // ms timestamp
+    else if (age > 1e9) ageMs = Date.now() - age * 1000; // s timestamp
+    else if (age < 1e7 && age > 0) ageMs = age * 60 * 1000; // minutes
   }
-  return { price, marketCap, liquidity, volume, holders, ageMinutes };
+  if (typeof ageMs === 'number' && !isNaN(ageMs) && ageMs > 0) {
+    const days = Math.floor(ageMs / (24 * 60 * 60 * 1000));
+    const hours = Math.floor((ageMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+    const minutes = Math.floor((ageMs % (60 * 60 * 1000)) / (60 * 1000));
+    const seconds = Math.floor((ageMs % (60 * 1000)) / 1000);
+    if (days > 0) {
+      ageDisplay = `${days} day${days > 1 ? 's' : ''}`;
+      if (hours > 0) ageDisplay += ` ${hours} hour${hours > 1 ? 's' : ''}`;
+    } else if (hours > 0) {
+      ageDisplay = `${hours} hour${hours > 1 ? 's' : ''}`;
+      if (minutes > 0) ageDisplay += ` ${minutes} minute${minutes > 1 ? 's' : ''}`;
+    } else if (minutes > 0) {
+      ageDisplay = `${minutes} minute${minutes > 1 ? 's' : ''}`;
+      if (seconds > 0) ageDisplay += ` ${seconds} second${seconds > 1 ? 's' : ''}`;
+    } else {
+      ageDisplay = `${seconds} second${seconds > 1 ? 's' : ''}`;
+    }
+  }
+  return { price, marketCap, liquidity, volume, holders, ageDisplay };
 }
 
 function getTokenBuySell(token: any) {
@@ -369,34 +419,11 @@ function getTokenBuySell(token: any) {
   return { buyVol, sellVol };
 }
 
-function buildInlineKeyboard(token: any, botUsername: string, pairAddress: string, userId?: string) {
-  const dexUrl = token.url || (pairAddress ? `https://dexscreener.com/solana/${pairAddress}` : '');
-  const webEmoji = '🌐', twitterEmoji = '🐦', tgEmoji = '💬', chartBtnEmoji = '📊', dexEmoji = '🧪', copyEmoji = '📋';
-  const inlineKeyboard: any[][] = [];
-  const row1: any[] = [];
-  if (dexUrl) row1.push({ text: `${dexEmoji} DexScreener`, url: dexUrl });
-  if (Array.isArray(token.links)) {
-    for (const l of token.links) {
-      if (l.type === 'website' && l.url) row1.push({ text: `${webEmoji} Website`, url: l.url });
-      if (l.type === 'twitter' && l.url) row1.push({ text: `${twitterEmoji} Twitter`, url: l.url });
-      if (l.type === 'telegram' && l.url) row1.push({ text: `${tgEmoji} Telegram`, url: l.url });
-    }
-  }
-  if (row1.length) inlineKeyboard.push(row1);
-  const row2: any[] = [];
-  if (dexUrl) row2.push({ text: `${chartBtnEmoji} Chart`, url: dexUrl });
-  let shareId = userId || token._userId || (token.tokenAddress || token.address || token.mint || token.pairAddress || '');
-  const shareUrl = `https://t.me/${botUsername}?start=${shareId}`;
-  row2.push({ text: `${copyEmoji} Share`, url: shareUrl });
-  if (row2.length) inlineKeyboard.push(row2);
-  return { inlineKeyboard, shareUrl };
-}
-
 function buildExtraFields(token: any) {
-  // إضافة الحقول غير المفيدة إلى قائمة التجاهل
+  // Add unimportant fields to the skip list
   const skipFields = new Set([
     'name','baseToken','tokenAddress','address','mint','pairAddress','url','imageUrl','logoURI','logo','links','description','symbol','priceUsd','price','marketCap','liquidity','volume','holders','age','genesis_date','pairCreatedAt',
-    'icon','header','openGraph' // الحقول غير المفيدة
+    'icon','header','openGraph' // unimportant fields
   ]);
   let msg = '';
   for (const key of Object.keys(token)) {
@@ -406,11 +433,11 @@ function buildExtraFields(token: any) {
     if (typeof value === 'number') {
       msg += `<b>${key}:</b> ${fmt(value, 6)}\n`;
     } else if (typeof value === 'string') {
-      // لا تعرض أي روابط صور أو صور
+      // Don't show any image links or pictures
       if (/^https?:\/\/.*\.(png|jpg|jpeg|gif|webp)$/i.test(value)) {
         continue;
       } else if (/^https?:\/.*/.test(value)) {
-        // إذا كان رابط، اعرضه كرابط على رمز تعبيري فقط
+        // If it's a link, show it as a link with an emoji only
         msg += `<b>${key}:</b> <a href='${value}'>🔗</a>\n`;
       } else {
         msg += `<b>${key}:</b> ${value}\n`;
@@ -431,34 +458,33 @@ function buildExtraFields(token: any) {
 
 export function buildTokenMessage(token: any, botUsername: string, pairAddress: string, userId?: string): { msg: string, inlineKeyboard: any[][] } {
   const { name, symbol, address, dexUrl, logo } = getTokenCoreFields(token);
-  const { price, marketCap, liquidity, volume, holders, ageMinutes } = getTokenStats(token);
+  const { price, marketCap, liquidity, volume, holders, ageDisplay } = getTokenStats(token);
   const { buyVol, sellVol } = getTokenBuySell(token);
   // --- Emojis ---
   const solEmoji = '🟣', memecoinEmoji = '🚀', chartEmoji = '📈', capEmoji = '💰', liqEmoji = '💧', volEmoji = '🔊', holdersEmoji = '👥', ageEmoji = '⏱️', linkEmoji = '🔗';
   // --- Message header ---
   let msg = '';
-  // فقط رمز تعبيري للعملة (بدون صورة أو رابط صورة)
-  msg += `🪙`;
-  msg += `<b>${solEmoji} ${name}${symbol ? ' <code>' + symbol + '</code>' : ''}</b>\n`;
-  msg += `<b>${linkEmoji} Address:</b> <code>${address}</code>\n`;
-  // --- الإحصائيات ---
+  // Show token name and symbol clearly
+  msg += `🪙${solEmoji} <b>${name ? name : 'Not available'}</b>${symbol ? ' <code>' + symbol + '</code>' : ''}\n`;
+  msg += `${linkEmoji} <b>Address:</b> <code>${address ? address : 'Not available'}</code>\n`;
+  // --- Stats ---
   msg += `${capEmoji} <b>Market Cap:</b> ${fmtField(marketCap, 'marketCap')} USD\n`;
   msg += `${liqEmoji} <b>Liquidity:</b> ${fmtField(liquidity, 'liquidity')} USD  `;
-  if (liquidity !== undefined && marketCap && marketCap > 0) {
+  if (typeof liquidity === 'number' && !isNaN(liquidity) && typeof marketCap === 'number' && marketCap > 0) {
     const liqPct = Math.min(100, Math.round((liquidity / marketCap) * 100));
     msg += progressBar(liqPct, 10, '🟦', '⬜') + ` ${liqPct}%\n`;
   } else {
     msg += '\n';
   }
   msg += `${volEmoji} <b>Volume 24h:</b> ${fmtField(volume, 'volume')} USD  `;
-  if (volume !== undefined && marketCap && marketCap > 0) {
+  if (typeof volume === 'number' && !isNaN(volume) && typeof marketCap === 'number' && marketCap > 0) {
     const volPct = Math.min(100, Math.round((volume / marketCap) * 100));
     msg += progressBar(volPct, 10, '🟩', '⬜') + ` ${volPct}%\n`;
   } else {
     msg += '\n';
   }
   msg += `${holdersEmoji} <b>Holders:</b> ${fmtField(holders, 'holders')}\n`;
-  msg += `${ageEmoji} <b>Age:</b> ${fmtField(ageMinutes, 'age')} min\n`;
+  msg += `${ageEmoji} <b>Age:</b> ${ageDisplay}\n`;
   msg += `${chartEmoji} <b>Price:</b> ${fmtField(price, 'price')} USD\n`;
   // --- Buy/Sell progress bar ---
   if (buyVol !== undefined || sellVol !== undefined) {
@@ -474,29 +500,17 @@ export function buildTokenMessage(token: any, botUsername: string, pairAddress: 
   msg += buildExtraFields(token);
   // --- Description ---
   if (token.description) msg += `\n<em>${token.description}</em>\n`;
-
-  // --- روابط العملة الفعلية بشكل احترافي في سطر منفصل أسفل الرسالة ---
-  let linksBlock = '';
-
-  if (Array.isArray(token.links)) {
-    for (const l of token.links) {
-      if (l.type === 'website' && l.url) linksBlock += `<a href='${l.url}'>🌐</a> `;
-      if (l.type === 'twitter' && l.url) linksBlock += `<a href='${l.url}'>🐦</a> `;
-      if (l.type === 'telegram' && l.url) linksBlock += `<a href='${l.url}'>💬</a> `;
-      if (l.type === 'reddit' && l.url) linksBlock += `<a href='${l.url}'>👽</a> `;
-    }
+  // --- Network line ---
+  if (token.chainId || token.chain || token.chainName) {
+    const network = token.chainId || token.chain || token.chainName;
+    msg += `🌐 <b>Network:</b> ${network}\n`;
   }
-  if (dexUrl) linksBlock += `<a href='${dexUrl}'>🧪</a> `;
-  if (linksBlock) msg += `\n${linksBlock.trim()}\n`;
-
-  // --- زر مشاركة احترافي في سطر منفصل أسفل الرسالة ---
-  const { inlineKeyboard, shareUrl } = buildInlineKeyboard(token, botUsername, pairAddress, userId);
-  msg += `\n<a href='${shareUrl}'>📋</a>\n`;
-
+  // --- Only add community/footer line ---
   msg += `\n${memecoinEmoji} <b>Solana Memecoin Community</b> | ${solEmoji} <b>Powered by DexScreener</b>\n`;
+  // --- Inline keyboard (all links/buttons at the bottom) ---
+  const { inlineKeyboard } = buildInlineKeyboard(token, botUsername, pairAddress, userId);
   return { msg, inlineKeyboard };
 }
-
 
 function progressBar(percent: number, size = 10, fill = '█', empty = '░') {
   const filled = Math.round((percent / 100) * size);
