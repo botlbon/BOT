@@ -126,7 +126,7 @@ function registerWsNotifications(bot: any, users: Record<string, any>) {
                 disable_web_page_preview: false,
                 reply_markup: { inline_keyboard: inlineKeyboard }
               });
-              appendSentHash(userId, hash);
+              await appendSentHash(userId, hash);
             } catch (err) {
               console.error(`Failed to send message to user ${userId}:`, err);
             }
