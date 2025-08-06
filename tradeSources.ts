@@ -10,52 +10,120 @@
 
 type TradeSource = 'jupiter' | 'raydium' | 'dexscreener';
 
-// Placeholder source modules (replace with real implementations)
+
+// --- Real Jupiter REST API integration ---
+const { Connection, Keypair } = require('@solana/web3.js');
+const { createJupiterApiClient } = require('@jup-ag/api');
+
 const Jupiter = {
   async buy(tokenMint: string, amount: number, secret: string, ctrl?: any) {
-    // Simulate random delay and possible failure
-    await new Promise(res => setTimeout(res, Math.random() * 400 + 100));
     if (ctrl?.cancelled) throw new Error('Cancelled');
-    if (Math.random() < 0.5) throw new Error('Jupiter buy failed');
-    return { tx: 'jupiter_tx_' + Math.random().toString(36).slice(2), source: 'jupiter' };
+    const SOL_MINT = 'So11111111111111111111111111111111111111112';
+    const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
+    let secretKey: Buffer;
+    try {
+      secretKey = Buffer.from(secret, 'base64');
+    } catch (e) {
+      throw new Error('Invalid base64 secret');
+    }
+    const keypair = Keypair.fromSecretKey(secretKey);
+    const userPublicKey = keypair.publicKey.toBase58();
+    // 1. Get Jupiter API client
+    const jupiter = createJupiterApiClient();
+    // 2. Get quote
+    const quote = await jupiter.quoteGet({
+      inputMint: SOL_MINT,
+      outputMint: tokenMint,
+      amount: Math.floor(amount * 1e9),
+      slippageBps: 100
+    });
+    if (!quote || !quote.routePlan || !quote.outAmount) {
+      throw new Error('No route found for this token');
+    }
+    // 3. Get swap transaction
+    const swapRequest = {
+      userPublicKey,
+      wrapAndUnwrapSol: true,
+      asLegacyTransaction: false,
+      quoteResponse: quote
+    };
+    console.log('[Jupiter.swapPost] swapRequest:', swapRequest);
+    const swapResp = await jupiter.swapPost({ swapRequest });
+    if (!swapResp || !swapResp.swapTransaction) {
+      throw new Error('Failed to get swap transaction from Jupiter');
+    }
+    // 3. Sign and send transaction
+    const swapTxBuf = Buffer.from(swapResp.swapTransaction, 'base64');
+    let txid = '';
+    try {
+      const tx = await connection.sendRawTransaction(swapTxBuf, { skipPreflight: false });
+      await connection.confirmTransaction(tx, 'confirmed');
+      txid = tx;
+    } catch (e) {
+        if (e && typeof e === 'object' && (e as any).name === 'SendTransactionError' && typeof (e as any).getLogs === 'function') {
+            try {
+                const logs = await (e as any).getLogs();
+                console.error('Transaction logs:', logs);
+            } catch (logErr) {
+                console.error('Failed to get transaction logs:', logErr);
+            }
+        }
+        throw new Error('Swap failed: ' + (e && typeof e === 'object' && 'message' in e ? (e as any).message : String(e)));
+    }
+    return { tx: txid, source: 'jupiter' };
   },
   async sell(tokenMint: string, amount: number, secret: string, ctrl?: any) {
-    await new Promise(res => setTimeout(res, Math.random() * 400 + 100));
     if (ctrl?.cancelled) throw new Error('Cancelled');
-    if (Math.random() < 0.5) throw new Error('Jupiter sell failed');
-    return { tx: 'jupiter_tx_' + Math.random().toString(36).slice(2), source: 'jupiter' };
-  }
-};
-const Raydium = {
-  async buy(tokenMint: string, amount: number, secret: string, ctrl?: any) {
-    await new Promise(res => setTimeout(res, Math.random() * 400 + 100));
-    if (ctrl?.cancelled) throw new Error('Cancelled');
-    if (Math.random() < 0.5) throw new Error('Raydium buy failed');
-    return { tx: 'raydium_tx_' + Math.random().toString(36).slice(2), source: 'raydium' };
-  },
-  async sell(tokenMint: string, amount: number, secret: string, ctrl?: any) {
-    await new Promise(res => setTimeout(res, Math.random() * 400 + 100));
-    if (ctrl?.cancelled) throw new Error('Cancelled');
-    if (Math.random() < 0.5) throw new Error('Raydium sell failed');
-    return { tx: 'raydium_tx_' + Math.random().toString(36).slice(2), source: 'raydium' };
-  }
-};
-const DexScreener = {
-  async buy(tokenMint: string, amount: number, secret: string, ctrl?: any) {
-    await new Promise(res => setTimeout(res, Math.random() * 400 + 100));
-    if (ctrl?.cancelled) throw new Error('Cancelled');
-    // Always succeed for placeholder
-    return { tx: 'dexscreener_tx_' + Math.random().toString(36).slice(2), source: 'dexscreener' };
-  },
-  async sell(tokenMint: string, amount: number, secret: string, ctrl?: any) {
-    await new Promise(res => setTimeout(res, Math.random() * 400 + 100));
-    if (ctrl?.cancelled) throw new Error('Cancelled');
-    return { tx: 'dexscreener_tx_' + Math.random().toString(36).slice(2), source: 'dexscreener' };
+    const SOL_MINT = 'So11111111111111111111111111111111111111112';
+    const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
+    let secretKey: Buffer;
+    try {
+      secretKey = Buffer.from(secret, 'base64');
+    } catch (e) {
+      throw new Error('Invalid base64 secret');
+    }
+    const keypair = Keypair.fromSecretKey(secretKey);
+    const userPublicKey = keypair.publicKey.toBase58();
+    // 1. Get Jupiter API client
+    const jupiter = createJupiterApiClient();
+    // 2. Get quote (token -> SOL)
+    const quote = await jupiter.quoteGet({
+      inputMint: tokenMint,
+      outputMint: SOL_MINT,
+      amount: Math.floor(amount * 1e9),
+      slippageBps: 100
+    });
+    if (!quote || !quote.routePlan || !quote.outAmount) {
+      throw new Error('No route found for this token');
+    }
+    // 3. Get swap transaction
+    const swapRequest = {
+      userPublicKey,
+      wrapAndUnwrapSol: true,
+      asLegacyTransaction: false,
+      quoteResponse: quote
+    };
+    console.log('[Jupiter.swapPost] swapRequest:', swapRequest);
+    const swapResp = await jupiter.swapPost({ swapRequest });
+    if (!swapResp || !swapResp.swapTransaction) {
+      throw new Error('Failed to get swap transaction from Jupiter');
+    }
+    // 3. Sign and send transaction
+    const swapTxBuf = Buffer.from(swapResp.swapTransaction, 'base64');
+    let txid = '';
+    try {
+      const tx = await connection.sendRawTransaction(swapTxBuf, { skipPreflight: false });
+      await connection.confirmTransaction(tx, 'confirmed');
+      txid = tx;
+    } catch (e) {
+      throw new Error('Swap failed: ' + (e && typeof e === 'object' && 'message' in e ? (e as any).message : String(e)));
+    }
+    return { tx: txid, source: 'jupiter' };
   }
 };
 
-const BUY_SOURCES = [Jupiter, Raydium, DexScreener];
-const SELL_SOURCES = [Jupiter, Raydium, DexScreener];
+const BUY_SOURCES = [Jupiter];
+const SELL_SOURCES = [Jupiter];
 
 // Helper: run all sources in parallel, return first success, cancel others
 async function raceSources(sources: any[], fnName: 'buy'|'sell', ...args: any[]): Promise<{tx: string, source: TradeSource}> {
@@ -86,11 +154,25 @@ async function raceSources(sources: any[], fnName: 'buy'|'sell', ...args: any[])
 }
 
 // Unified buy: tries all sources in parallel, returns first success
-export async function unifiedBuy(tokenMint: string, amount: number, secret: string): Promise<{tx: string, source: TradeSource}> {
+/**
+ * @param {string} tokenMint
+ * @param {number} amount
+ * @param {string} secret
+ * @returns {Promise<{tx: string, source: TradeSource}>}
+ */
+async function unifiedBuy(tokenMint: string, amount: number, secret: string): Promise<{tx: string, source: TradeSource}> {
   return raceSources(BUY_SOURCES, 'buy', tokenMint, amount, secret);
 }
 
-// Unified sell: tries all sources in parallel, returns first success
-export async function unifiedSell(tokenMint: string, amount: number, secret: string): Promise<{tx: string, source: TradeSource}> {
+/**
+ * @param {string} tokenMint
+ * @param {number} amount
+ * @param {string} secret
+ * @returns {Promise<{tx: string, source: TradeSource}>}
+ */
+async function unifiedSell(tokenMint: string, amount: number, secret: string): Promise<{tx: string, source: TradeSource}> {
   return raceSources(SELL_SOURCES, 'sell', tokenMint, amount, secret);
 }
+
+module.exports.unifiedBuy = unifiedBuy;
+module.exports.unifiedSell = unifiedSell;

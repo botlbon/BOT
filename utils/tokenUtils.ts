@@ -27,31 +27,10 @@ const EMPTY_VALUES = [undefined, null, '-', '', 'N/A', 'null', 'undefined'];
 
 // Unified field map (easily extendable)
 const FIELD_MAP: Record<string, string[]> = {
-  marketCap: [
-    'marketCap', 'fdv', 'totalAmount', 'baseToken.marketCap', 'baseToken.fdv', 'baseToken.totalAmount',
-    'market_cap', 'market_cap_usd', 'market_capitalization', 'baseToken.market_cap', 'baseToken.market_cap_usd',
-    'marketCapUsd', 'baseToken.marketCapUsd', 'market_capitalization_usd', 'baseToken.market_capitalization_usd'
-  ],
-  liquidity: [
-    'liquidity', 'liquidityUsd', 'baseToken.liquidity', 'liquidity.usd', 'baseToken.liquidity.usd',
-    'liquidityUSD', 'baseToken.liquidityUSD', 'liquidity_usd', 'baseToken.liquidity_usd',
-    'reserve', 'baseToken.reserve', 'reserve_usd', 'baseToken.reserve_usd'
-  ],
-  volume: [
-    'volume', 'volume24h', 'amount', 'baseToken.volume', 'baseToken.volume24h',
-    'volume.h24', 'baseToken.volume.h24', 'volumeUSD', 'baseToken.volumeUSD',
-    'volume_usd', 'baseToken.volume_usd', 'totalVolume', 'baseToken.totalVolume',
-    'total_volume', 'baseToken.total_volume', 'total_volume_usd', 'baseToken.total_volume_usd'
-  ],
-  holders: [
-    'holders', 'baseToken.holders', 'numHolders', 'baseToken.numHolders',
-    'holdersCount', 'baseToken.holdersCount', 'holders_count', 'baseToken.holders_count'
-  ],
-  age: [
-    'age', 'genesis_date', 'pairCreatedAt', 'createdAt', 'baseToken.createdAt',
-    'created_at', 'baseToken.created_at', 'launchDate', 'baseToken.launchDate',
-    'launch_date', 'baseToken.launch_date', 'timestamp', 'baseToken.timestamp'
-  ]
+  marketCap: ['marketCap', 'fdv', 'totalAmount', 'amount'],
+  liquidity: ['liquidity', 'liquidityUsd'],
+  volume: ['volume', 'amount', 'totalAmount'],
+  age: ['age', 'createdAt'],
 };
 
 const missingFieldsLog: Set<string> = new Set();
@@ -63,35 +42,24 @@ export function getField(token: any, ...fields: string[]): any {
   for (let f of fields) {
     const mapped = FIELD_MAP[f] || [f];
     for (const mf of mapped) {
+      // دعم المسارات المتداخلة
       const path = mf.split('.');
       let val = token;
       for (const key of path) {
         if (val == null) break;
         val = val[key];
       }
-      if (!EMPTY_VALUES.includes(val)) return val;
-      if (mf in token && !EMPTY_VALUES.includes(token[mf])) return token[mf];
-    }
-  }
-  // If the field is an object, extract the first numeric value
-  for (let f of fields) {
-    const mapped = FIELD_MAP[f] || [f];
-    for (const mf of mapped) {
-      let val = token[mf];
-      if (typeof val === 'object' && val !== null) {
-        if (Array.isArray(val)) {
-          const num = val.find(v => typeof v === 'number' && !isNaN(v));
-          if (num !== undefined) return num;
-        } else {
-          for (const k in val) {
-            if (typeof val[k] === 'number' && !isNaN(val[k])) return val[k];
-          }
-        }
-      }
+      if (!EMPTY_VALUES.includes(val)) return extractNumeric(val, val);
+      if (mf in token && !EMPTY_VALUES.includes(token[mf])) return extractNumeric(token[mf], token[mf]);
     }
   }
   if (fields.length > 0) missingFieldsLog.add(fields[0]);
   return undefined;
+}
+
+// دالة لعرض الحقول المفقودة (للمطور أو المستخدم)
+export function getMissingFields(): string[] {
+  return Array.from(missingFieldsLog);
 }
 
 // Extract a number from any value (helper)
@@ -172,7 +140,6 @@ export let STRATEGY_FIELDS: StrategyField[] = [
   { key: 'minMarketCap', label: 'Minimum Market Cap (USD)', type: 'number', optional: false, tokenField: 'marketCap' },
   { key: 'minLiquidity', label: 'Minimum Liquidity (USD)', type: 'number', optional: false, tokenField: 'liquidity' },
   { key: 'minVolume', label: 'Minimum Volume (24h USD)', type: 'number', optional: false, tokenField: 'volume' },
-  { key: 'minHolders', label: 'Minimum Holders', type: 'number', optional: true, tokenField: 'holders' },
   { key: 'minAge', label: 'Minimum Age (minutes)', type: 'number', optional: false, tokenField: 'age' },
   { key: 'buyAmount', label: 'Buy Amount (SOL)', type: 'number', optional: false },
   { key: 'sellPercent1', label: 'First Sell Percent (%)', type: 'number', optional: false },
@@ -185,14 +152,38 @@ export let STRATEGY_FIELDS: StrategyField[] = [
 
 
 // ========== DexScreener API Integration ==========
-export async function fetchDexScreenerProfiles(): Promise<any[]> {
-  const url = 'https://api.dexscreener.com/token-profiles/latest/v1';
+
+/**
+ * Fetch token profiles from DexScreener API.
+ * @param chainId Optional chainId to filter (e.g., 'solana').
+ * @param extraParams Optional object for more query params.
+ * @returns Array of token profiles.
+ *
+ * If the API does not support filtering, filtering will be done locally.
+ */
+export async function fetchDexScreenerProfiles(chainId?: string, extraParams?: Record<string, string>): Promise<any[]> {
+  let url = 'https://api.dexscreener.com/token-profiles/latest/v1';
+  const params: Record<string, string> = {};
+  if (chainId) params.chainId = chainId;
+  if (extraParams) Object.assign(params, extraParams);
+  const query = Object.keys(params).map(k => `${encodeURIComponent(k)}=${encodeURIComponent(params[k])}`).join('&');
+  if (query) url += `?${query}`;
   try {
     const response = await axios.get(url);
-    return Array.isArray(response.data) ? response.data : [];
-  } catch (err) {
-    console.error('DexScreener token-profiles fetch error:', err);
-    return [];
+    let data = Array.isArray(response.data) ? response.data : [];
+    // If API does not support filtering, fallback to local filtering
+    if (chainId && data.length && !data.some(t => t.chainId === chainId)) {
+      data = data.filter((t: any) => t.chainId === chainId);
+    }
+    return data;
+  } catch (err: any) {
+    // Log more details
+    const msg = err?.message || err?.toString() || 'Unknown error';
+    const status = err?.response?.status;
+    const urlInfo = url;
+    console.error(`DexScreener token-profiles fetch error: ${msg} (status: ${status}) [${urlInfo}]`);
+    // Optionally, throw or return a special error object
+    throw new Error(`Failed to fetch token profiles from DexScreener: ${msg}`);
   }
 }
 
@@ -213,18 +204,21 @@ export async function fetchDexScreenerPairsForSolanaTokens(tokenAddresses: strin
   return allPairs;
 }
 
-export async function fetchDexScreenerTokens(): Promise<any[]> {
-  // 1. Fetch all Solana tokens from token-profiles
-  const profiles = await fetchDexScreenerProfiles();
-  // Only Solana tokens
-  const solanaProfiles = profiles.filter((t: any) => t.chainId === 'solana');
-  // 2. Fetch pairs (market data) for each Solana token
-  const tokenAddresses = solanaProfiles.map((t: any) => t.tokenAddress).filter(Boolean);
+/**
+ * Fetch Solana tokens (or any chain) from DexScreener with optional params.
+ * @param chainId Chain to fetch (default: 'solana')
+ * @param extraParams Optional query params (e.g. { limit: '100' })
+ */
+export async function fetchDexScreenerTokens(chainId: string = 'solana', extraParams?: Record<string, string>): Promise<any[]> {
+  // 1. Fetch tokens from token-profiles with filtering at API level
+  const profiles = await fetchDexScreenerProfiles(chainId, extraParams ?? { limit: '100' });
+  // 2. Fetch pairs (market data) for each token
+  const tokenAddresses = profiles.map((t: any) => t.tokenAddress).filter(Boolean);
   const pairs = await fetchDexScreenerPairsForSolanaTokens(tokenAddresses);
 
   // 3. Merge data: for each token, merge profile with pairs (market data)
   const allTokens: Record<string, any> = {};
-  for (const profile of solanaProfiles) {
+  for (const profile of profiles) {
     const addr = profile.tokenAddress;
     if (!addr) continue;
     allTokens[addr] = { ...profile };
@@ -383,7 +377,8 @@ function getTokenStats(token: any) {
   const liquidity = extractNumeric(getField(token, 'liquidity'));
   const volume = extractNumeric(getField(token, 'volume'));
   const holders = extractNumeric(getField(token, 'holders'));
-  let age = getField(token, 'age', 'genesis_date', 'pairCreatedAt');
+  let age = getField(token, 'age', 'createdAt');
+  // حذف سطر الهولدرز نهائياً
   let ageDisplay: string = 'Not available';
   let ageMs = undefined;
   if (typeof age === 'string') age = Number(age);
@@ -483,7 +478,6 @@ export function buildTokenMessage(token: any, botUsername: string, pairAddress: 
   } else {
     msg += '\n';
   }
-  msg += `${holdersEmoji} <b>Holders:</b> ${fmtField(holders, 'holders')}\n`;
   msg += `${ageEmoji} <b>Age:</b> ${ageDisplay}\n`;
   msg += `${chartEmoji} <b>Price:</b> ${fmtField(price, 'price')} USD\n`;
   // --- Buy/Sell progress bar ---
@@ -580,12 +574,11 @@ export function autoFilterTokens(tokens: any[], strategy: Record<string, any>): 
           tokenValue = Math.floor((Date.now() - ageVal * 1000) / 60000);
         }
       }
+      // تطبيع القيمة الرقمية دائماً
+      tokenValue = extractNumeric(tokenValue);
       const numValue = Number(value);
       const numTokenValue = Number(tokenValue);
       if (isNaN(numTokenValue)) {
-        if (field.tokenField === 'holders' && (!numValue || numValue === 0)) {
-          continue;
-        }
         if (!field.optional) {
           return false;
         } else {

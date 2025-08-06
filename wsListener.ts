@@ -3,7 +3,7 @@
 
 
 import { fetchDexScreenerTokens } from './utils/tokenUtils';
-import { unifiedBuy, unifiedSell } from './tradeSources';
+const { unifiedBuy, unifiedSell } = require('./tradeSources');
 
 /**
  * Entry point for market monitoring and user notifications
@@ -11,12 +11,13 @@ import { unifiedBuy, unifiedSell } from './tradeSources';
 function registerWsNotifications(bot: any, users: Record<string, any>) {
   async function pollAndNotify() {
     try {
-      const tokens = await fetchDexScreenerTokens();
+      // Fetch only Solana tokens, limit to 100, and filter by min liquidity at API level if supported
+      const tokens = await fetchDexScreenerTokens('solana', { limit: '100' });
       // Filter tokens: exclude tokens with low liquidity or marked as scam
+      // Still filter for scam tokens locally
       const filteredTokens = tokens.filter((token: any) => {
-        const liquidityOk = token.liquidity && token.liquidity.usd && token.liquidity.usd > 1000;
         const notScam = !(token.baseToken?.symbol?.toLowerCase().includes('scam') || token.baseToken?.name?.toLowerCase().includes('scam'));
-        return liquidityOk && notScam;
+        return notScam;
       });
 
       // Import required functions
@@ -75,7 +76,8 @@ function registerWsNotifications(bot: any, users: Record<string, any>) {
                   await new Promise(res => setTimeout(res, 60 * 1000)); // 1 min
                   pollCount++;
                   // Fetch latest price
-                  const freshTokens = await fetchDexScreenerTokens();
+                  // Fetch only Solana tokens, limit to 100 for price polling
+                  const freshTokens = await fetchDexScreenerTokens('solana', { limit: '100' });
                   const fresh = freshTokens.find((t: any) => (t.pairAddress || t.address || t.tokenAddress || '') === addr);
                   if (!fresh) continue;
                   const currentPrice = Number(fresh.priceUsd || fresh.price || 0);

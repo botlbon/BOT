@@ -16,7 +16,7 @@ import { getErrorMessage, limitHistory, hasWallet, walletKeyboard, loadUsers, sa
 import { filterTokensByStrategy } from './bot/strategy';
 import { loadKeypair, getConnection } from './wallet';
 import { parseSolanaPrivateKey, toBase64Key } from './keyFormat';
-import { unifiedBuy, unifiedSell } from './tradeSources';
+const { unifiedBuy, unifiedSell } = require('./tradeSources');
 import { helpMessages } from './helpMessages';
 import { monitorCopiedWallets } from './utils/portfolioCopyMonitor';
 
@@ -616,59 +616,78 @@ async function fetchDexScreenerPairs(tokenAddress: string): Promise<any[]> {
 // --- Unified token fetch: DexScreener (main), Jupiter (secondary) ---
 async function fetchUnifiedTokenList(): Promise<any[]> {
   let allTokens: any[] = [];
-  // DexScreener: fetch trending tokens (or from a list, or from user strategies)
-  // For demo, fetch a few known tokens (SOL, USDC, etc.)
-  const trending = [
-    'So11111111111111111111111111111111111111112', // SOL
-    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
-    // ...add more trending or user-watched tokens here
-  ];
-  for (const addr of trending) {
-    const pairs = await fetchDexScreenerPairs(addr);
-    allTokens = allTokens.concat(pairs.map((p: any) => ({
-      name: p.baseToken?.name,
-      symbol: p.baseToken?.symbol,
-      address: p.baseToken?.address,
-      priceUsd: p.priceUsd,
-      priceNative: p.priceNative,
-      marketCap: p.marketCap,
-      volume: p.volume?.h24,
-      holders: undefined, // DexScreener does not provide holders
-      age: p.pairCreatedAt,
-      verified: undefined,
-      url: p.url,
-      pairAddress: p.pairAddress,
-      dexId: p.dexId,
-      quoteToken: p.quoteToken,
-      txns: p.txns,
-      liquidity: p.liquidity
-    })));
-  }
-  // Jupiter (optional, as secondary)
   try {
-    const jupRes = await fetch('https://quote-api.jup.ag/v6/tokens');
-    if (jupRes.ok) {
-      const jupData: unknown = await jupRes.json();
-      if (typeof jupData === 'object' && jupData !== null && 'tokens' in jupData && Array.isArray((jupData as any).tokens)) {
-        allTokens = allTokens.concat((jupData as any).tokens.map((t: any) => ({
-          name: t.name,
-          symbol: t.symbol,
-          address: t.address,
-          priceUsd: t.price,
-          imageUrl: t.logoURI,
-          verified: t.tags?.includes('verified'),
-          description: t.extensions?.description,
-          links: [
-            ...(t.extensions?.website ? [{ label: 'Website', url: t.extensions.website, type: 'website' }] : []),
-            ...(t.extensions?.twitter ? [{ label: 'Twitter', url: t.extensions.twitter, type: 'twitter' }] : []),
-            ...(t.extensions?.discord ? [{ label: 'Discord', url: t.extensions.discord, type: 'discord' }] : []),
-          ],
-        })));
-      }
+    // 1. Boosts endpoint
+    const boostsRes = await fetch('https://api.dexscreener.com/token-boosts/latest/v1');
+    let boostsTokens: any[] = [];
+    if (boostsRes.ok) {
+      const boostsData = await boostsRes.json();
+      console.log('[DEBUG] DexScreener boosts response:', JSON.stringify(boostsData).slice(0, 500));
+      boostsTokens = Array.isArray(boostsData) ? boostsData : (Array.isArray(boostsData.boosts) ? boostsData.boosts : []);
+      allTokens = allTokens.concat(boostsTokens.map((p: any) => ({
+        name: p.name,
+        symbol: p.symbol,
+        address: p.tokenAddress,
+        priceUsd: p.priceUsd,
+        priceNative: p.priceNative,
+        marketCap: p.marketCap,
+        volume: p.amount ?? p.volume,
+        holders: p.holders,
+        age: p.createdAt ?? p.age,
+        verified: p.verified,
+        url: p.url,
+        pairAddress: p.pairAddress,
+        dexId: p.dexId,
+        quoteToken: p.quoteToken,
+        txns: p.txns,
+        liquidity: p.liquidity
+      })));
+    }
+    // 2. Profiles endpoint
+    const profilesRes = await fetch('https://api.dexscreener.com/token-profiles/latest/v1?chainId=solana&limit=100');
+    let profilesTokens: any[] = [];
+    if (profilesRes.ok) {
+      const profilesData = await profilesRes.json();
+      console.log('[DEBUG] DexScreener profiles response:', JSON.stringify(profilesData).slice(0, 500));
+      profilesTokens = Array.isArray(profilesData) ? profilesData : (Array.isArray(profilesData.profiles) ? profilesData.profiles : []);
+      allTokens = allTokens.concat(profilesTokens.map((p: any) => ({
+        name: p.name,
+        symbol: p.symbol,
+        address: p.tokenAddress,
+        priceUsd: p.priceUsd,
+        priceNative: p.priceNative,
+        marketCap: p.marketCap,
+        volume: p.amount ?? p.volume,
+        holders: p.holders,
+        age: p.createdAt ?? p.age,
+        verified: p.verified,
+        url: p.url,
+        pairAddress: p.pairAddress,
+        dexId: p.dexId,
+        quoteToken: p.quoteToken,
+        txns: p.txns,
+        liquidity: p.liquidity
+      })));
     }
   } catch (e) {
-    console.error('Jupiter fetch error:', e);
+    console.error('DexScreener boosts/profiles fetch error:', e);
   }
+  // استبعاد العملات الكبيرة المعروفة (مثل USDC, SOL)
+  const blacklist = [
+    'So11111111111111111111111111111111111111112', // SOL
+    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+    'Es9vMFrzaCERa8wF5wF4QG1rj5Q3g9Q2r5r9Q2r5r9Q2', // USDT (مثال)
+  ];
+  // فلترة توكنات سولانا فقط مع pairAddress صحيح واستبعاد عناوين 0x و ::
+  allTokens = allTokens.filter(t => {
+    const addr = t.address || t.tokenAddress || t.pairAddress;
+    if (!addr) return false;
+    if (blacklist.includes(addr)) return false;
+    if (typeof addr === 'string' && (addr.startsWith('0x') || addr.includes('::'))) return false;
+    // يجب أن يكون url يحتوي /solana/
+    if (!(t.url && t.url.includes('/solana/'))) return false;
+    return true;
+  });
   // Deduplicate by address
   const seen = new Set();
   const deduped = allTokens.filter(t => {
@@ -677,7 +696,35 @@ async function fetchUnifiedTokenList(): Promise<any[]> {
     seen.add(addr);
     return true;
   });
-  return deduped;
+  // جلب بيانات تفصيلية لأي رمز ناقص marketCap أو liquidity أو age أو holders
+  async function fetchTokenDetails(address: string) {
+    try {
+      const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${address}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      // ابحث عن أول نتيجة تخص سولانا
+      const solanaPair = (data.pairs || []).find((p: any) => p.chainId === 'solana');
+      if (!solanaPair) return null;
+      return {
+        marketCap: solanaPair.fdv || solanaPair.marketCap,
+        liquidity: solanaPair.liquidity && solanaPair.liquidity.usd,
+        volume: solanaPair.volume && solanaPair.volume.h24,
+        age: solanaPair.age,
+        holders: solanaPair.holders,
+        ...solanaPair
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // أكمل البيانات الناقصة فقط
+  const completed = await Promise.all(deduped.map(async t => {
+    if (t.marketCap && t.liquidity && t.age && t.holders) return t;
+    const details = await fetchTokenDetails(t.address || t.tokenAddress || t.pairAddress);
+    return details ? { ...t, ...details } : t;
+  }));
+  return completed;
 }
 
 // Define addHoneyToken at top level
@@ -763,7 +810,39 @@ async function autoStrategyMonitorAndTradeWatcher() {
           { parse_mode: 'HTML' }
         );
       } catch (e: any) {
-        // Optionally notify user of error
+        // Surface buy errors to user and terminal, and fetch logs if possible
+        let errorMsg = `❌ <b>Auto-buy failed for token:</b> <code>${t.address}</code>\n`;
+        let logs: string[] | undefined;
+        if (e && typeof e === 'object') {
+          if (e.message) errorMsg += `\n<b>Error:</b> <code>${e.message}</code>`;
+          // If it's a SendTransactionError and has getLogs, fetch logs
+          if (e.name === 'SendTransactionError' && typeof e.getLogs === 'function') {
+            try {
+              logs = await e.getLogs();
+              if (logs) errorMsg += `\n<b>Logs:</b> <pre>${Array.isArray(logs) ? logs.join('\n') : logs}</pre>`;
+            } catch (logErr: any) {
+              errorMsg += `\n<b>Log fetch error:</b> <code>${logErr && typeof logErr === 'object' && 'message' in logErr ? logErr.message : String(logErr)}</code>`;
+            }
+          }
+          // Always show transactionLogs if present
+          if (e.transactionLogs) {
+            errorMsg += `\n<b>Transaction Logs:</b> <pre>${Array.isArray(e.transactionLogs) ? e.transactionLogs.join('\n') : e.transactionLogs}</pre>`;
+          }
+          // Always show transactionMessage if present
+          if (e.transactionMessage) {
+            errorMsg += `\n<b>Transaction Message:</b> <code>${e.transactionMessage}</code>`;
+          }
+          if (e.logs) {
+            errorMsg += `\n<b>Logs:</b> <pre>${Array.isArray(e.logs) ? e.logs.join('\n') : e.logs}</pre>`;
+          }
+        } else {
+          errorMsg += `\n<b>Error:</b> <code>${e}</code>`;
+        }
+        // Print to terminal for debugging
+        console.error('Auto-buy error:', e);
+        if (logs) console.error('Transaction logs:', logs);
+        // Send to user via Telegram
+        await bot.telegram.sendMessage(userId, errorMsg, { parse_mode: 'HTML' });
       }
     }
     // 2. مراقبة الصفقات المفتوحة وتنفيذ البيع/وقف الخسارة تلقائيًا
@@ -771,7 +850,7 @@ async function autoStrategyMonitorAndTradeWatcher() {
       if (trade._watching) continue; // لا تكرر المراقبة
       trade._watching = true;
       (async function watch(tradeObj, userObj, userIdStr) {
-        const { unifiedSell } = await import('./tradeSources');
+        // unifiedSell متوفر من الأعلى بنمط require
         let active = true;
         while (active) {
           await new Promise(res => setTimeout(res, 2000));
@@ -942,7 +1021,34 @@ bot.action(/buy_token_(.+)/, async (ctx: any) => {
       { parse_mode: 'HTML' }
     );
   } catch (e: any) {
-    await ctx.reply('❌ Buy failed: ' + getErrorMessage(e));
+    // Surface buy errors to user and terminal, and fetch logs if possible
+    let errorMsg = `❌ Buy failed: `;
+    let logs: string[] | undefined;
+    // Debug: Print error type and keys
+    console.error('Manual buy error:', e);
+    console.error('Manual buy error typeof:', typeof e);
+    if (e && typeof e === 'object') {
+      console.error('Manual buy error keys:', Object.keys(e));
+      console.error('Manual buy error constructor:', e.constructor?.name);
+    }
+    if (e && typeof e === 'object') {
+      if (e.message) errorMsg += `\n<b>Error:</b> <code>${e.message}</code>`;
+      // If it's a SendTransactionError and has getLogs, fetch logs
+      if (e.name === 'SendTransactionError' && typeof e.getLogs === 'function') {
+        try {
+          logs = await e.getLogs();
+          if (logs) errorMsg += `\n<b>Logs:</b> <pre>${Array.isArray(logs) ? logs.join('\n') : logs}</pre>`;
+        } catch (logErr: any) {
+          errorMsg += `\n<b>Log fetch error:</b> <code>${logErr && typeof logErr === 'object' && 'message' in logErr ? logErr.message : String(logErr)}</code>`;
+        }
+      } else if (e.logs) {
+        errorMsg += `\n<b>Logs:</b> <pre>${Array.isArray(e.logs) ? e.logs.join('\n') : e.logs}</pre>`;
+      }
+    } else {
+      errorMsg += `\n<b>Error:</b> <code>${e}</code>`;
+    }
+    if (logs) console.error('Transaction logs:', logs);
+    await ctx.reply(errorMsg, { parse_mode: 'HTML' });
   }
 });
 bot.action('exportkey', async (ctx: any) => {
@@ -1027,8 +1133,8 @@ bot.action('show_tokens', async (ctx: any) => {
   await ctx.reply('🔄 Fetching latest tokens and managing auto-trades ...');
   try {
     ctx.session = ctx.session || {};
+    const user = getOrRegisterUser(ctx);
     const userId = String(ctx.from?.id);
-    const user = users[userId];
     // --- 1. Prepare and filter tokens as before ---
     const strategyKey = getStrategyCacheKey(user?.strategy);
     ctx.session.tokenCache = ctx.session.tokenCache || {};
@@ -1037,9 +1143,97 @@ bot.action('show_tokens', async (ctx: any) => {
     let tokens: any[] = [];
     if (ctx.session.tokenCache[strategyKey].tokens.length === 0 || now - ctx.session.tokenCache[strategyKey].last > CACHE_TTL) {
       tokens = await fetchUnifiedTokenList();
+      console.log('[show_tokens] Tokens fetched:', tokens.length);
+      // --- Debug: Print original token object before normalization ---
+      console.log('[show_tokens] Raw tokens from API:');
+      tokens.forEach((t, i) => {
+        console.log(`#${i+1} RAW:`, JSON.stringify(t));
+      });
+
+      // --- Fetch full details for each token and merge ---
+      const tokensWithDetails = [];
+      for (const t of tokens) {
+        // استبعاد التوكنات غير التابعة لشبكة Solana أو التي ليس لديها pairAddress
+        if ((t.chainId && t.chainId !== 'solana') || !t.pairAddress) continue;
+        let merged = { ...t };
+        try {
+          const addr = t.address || t.tokenAddress || t.pairAddress;
+          if (addr) {
+            const pairs = await fetchDexScreenerPairs(addr);
+            if (pairs && pairs.length > 0) {
+              // Merge the first pair's data into your token object
+              merged = { ...t, ...pairs[0] };
+            }
+          }
+        } catch (e) {
+          // If error, just use t
+        }
+        tokensWithDetails.push(merged);
+      }
+
+      // --- Normalize all tokens for numeric filtering ---
+      function normalizeTokenFields(token: any): any {
+        // Calculate age in minutes from pairCreatedAt if available, else fallback to token.age
+        let ageMinutes = 0;
+        const now = Date.now();
+        if (token.pairCreatedAt) {
+          // pairCreatedAt is usually in ms
+          if (typeof token.pairCreatedAt === 'string') {
+            const ts = Number(token.pairCreatedAt);
+            if (!isNaN(ts)) ageMinutes = Math.floor((now - ts) / 60000);
+          } else if (typeof token.pairCreatedAt === 'number') {
+            ageMinutes = Math.floor((now - token.pairCreatedAt) / 60000);
+          }
+        } else if (token.age) {
+          // fallback: if age is a timestamp, convert to minutes
+          let ageVal = token.age;
+          if (typeof ageVal === 'string') ageVal = Number(ageVal);
+          if (typeof ageVal === 'number') {
+            if (ageVal > 1e12) {
+              ageMinutes = Math.floor((now - ageVal) / 60000);
+            } else if (ageVal > 1e9) {
+              ageMinutes = Math.floor((now - ageVal * 1000) / 60000);
+            } else if (ageVal < 1e7 && ageVal > 0) {
+              ageMinutes = ageVal;
+            }
+          }
+        }
+        const norm = {
+          ...token,
+          marketCap: Number(token.marketCap ?? token.fdv ?? 0),
+          liquidity: Number(token.liquidity?.usd ?? token.liquidity ?? 0),
+          volume: Number(token.volume?.h24 ?? token.volume ?? token.volume24h ?? 0),
+          holders: Number(token.holders ?? 0),
+          age: ageMinutes,
+        };
+        // Debug: Print normalized token
+        console.log(`[show_tokens] NORMALIZED #${token.name || token.symbol || token.address}:`, JSON.stringify(norm));
+        return norm;
+      }
+      tokens = tokensWithDetails.map(normalizeTokenFields);
+      // --- Debug: Print all tokens' key fields before filtering ---
+      console.log('[show_tokens] Token fields before filtering:');
+      tokens.forEach((t, i) => {
+        console.log(`#${i+1} ${t.name || t.symbol || t.address}: marketCap=${t.marketCap}, liquidity=${t.liquidity}, volume=${t.volume}, age=${t.age}`);
+      });
       if (user && user.strategy) {
         if (user.strategy.minHolders === undefined || user.strategy.minHolders === null) user.strategy.minHolders = 0;
-        tokens = filterTokensByStrategy(tokens, user.strategy);
+        const before = tokens.length;
+        // فلترة مرنة: تجاهل الشرط إذا القيمة 0 أو غير متوفرة
+        tokens = tokens.filter(t => {
+          // marketCap
+          if (user.strategy.minMarketCap && user.strategy.minMarketCap > 0 && t.marketCap > 0 && t.marketCap < user.strategy.minMarketCap) return false;
+          // liquidity
+          if (user.strategy.minLiquidity && user.strategy.minLiquidity > 0 && t.liquidity > 0 && t.liquidity < user.strategy.minLiquidity) return false;
+          // volume
+          if (user.strategy.minVolume && user.strategy.minVolume > 0 && t.volume < user.strategy.minVolume) return false;
+          // age
+          if (user.strategy.minAge && user.strategy.minAge > 0 && t.age > 0 && t.age < user.strategy.minAge) return false;
+          // holders
+          if (user.strategy.minHolders && user.strategy.minHolders > 0 && t.holders < user.strategy.minHolders) return false;
+          return true;
+        });
+        console.log('[show_tokens] After FLEXIBLE filter:', tokens.length, 'strategy:', user.strategy, 'before:', before);
       }
       ctx.session.tokenCache[strategyKey].tokens = tokens;
       ctx.session.tokenCache[strategyKey].last = now;
@@ -1054,11 +1248,12 @@ bot.action('show_tokens', async (ctx: any) => {
       await ctx.reply('❌ You have blocked the bot.');
       return;
     }
+    // بعد الفلترة المرنة بالأعلى، لا تعيد الفلترة الصارمة هنا
     let filtered = tokens;
     let strategyLog = '';
+    // strategyLog فقط لأغراض السجل أو التصحيح
     if (user && user.strategy) {
       if (user.strategy.minHolders === undefined || user.strategy.minHolders === null) user.strategy.minHolders = 0;
-      filtered = filterTokensByStrategy(tokens, user.strategy);
       strategyLog = JSON.stringify(user.strategy);
     }
     // --- 2. Unique tokens logic as before ---
@@ -1092,7 +1287,7 @@ bot.action('show_tokens', async (ctx: any) => {
     // --- Helper: monitor price and execute sell/stop-loss ---
     async function monitorTrade(trade: any, user: any) {
       // This function will poll price every 2s and execute sell/stop-loss as needed
-      const { unifiedSell } = await import('./tradeSources');
+      // unifiedSell متوفر من الأعلى بنمط require
       let active = true;
       while (active) {
         await new Promise(res => setTimeout(res, 2000));
@@ -1159,26 +1354,30 @@ bot.action('show_tokens', async (ctx: any) => {
     let sent = 0;
     for (const t of sorted) {
       const addr = t.address || t.tokenAddress || t.pairAddress;
+      // --- Safe access to strategy fields ---
+      const strat = user.strategy || {};
+      const maxActiveTrades = (typeof strat.maxActiveTrades === 'number' && strat.maxActiveTrades > 0) ? strat.maxActiveTrades : 1;
+      const buyAmount = (typeof strat.buyAmount === 'number' && strat.buyAmount > 0) ? strat.buyAmount : 0.01;
       // --- Check if user can open a new trade ---
-      if (gAny.openTrades[userId].length >= user.strategy.maxActiveTrades) {
+      if (gAny.openTrades[userId].length >= maxActiveTrades) {
         await ctx.reply('⚠️ Max active trades reached. Waiting for a trade to close before opening new ones.');
         break;
       }
       // --- Check wallet balance ---
       const solBalance = await getSolBalance(user.wallet);
-      if (solBalance < (user.strategy.buyAmount * 1e9)) {
+      if (solBalance < (buyAmount * 1e9)) {
         await ctx.reply('❌ Not enough SOL balance to open new trade.');
         break;
       }
       // --- Execute buy instantly ---
       try {
-        const { unifiedBuy } = await import('./tradeSources');
-        const { tx, source } = await unifiedBuy(addr, user.strategy.buyAmount, user.secret);
+        // unifiedBuy متوفر من الأعلى بنمط require
+        const { tx, source } = await unifiedBuy(addr, buyAmount, user.secret);
         // Register trade state
         const entryPrice = Number(t.priceUsd || t.price || 0);
         const trade = {
           tokenAddress: addr,
-          amount: user.strategy.buyAmount,
+          amount: buyAmount,
           entryPrice,
           sold1: false,
           sold2: false,
@@ -1187,13 +1386,48 @@ bot.action('show_tokens', async (ctx: any) => {
           source
         };
         gAny.openTrades[userId].push(trade);
-        const buyAmount = typeof user.strategy.buyAmount === 'number' && !isNaN(user.strategy.buyAmount) ? user.strategy.buyAmount : 0;
         const tokenAddr = addr || '-';
         await ctx.reply(`🚀 Bought ${buyAmount} SOL of ${tokenAddr} at $${entryPrice}. Monitoring for targets...`);
         // Start monitoring this trade
         monitorTrade(trade, user);
-      } catch (e) {
-        await ctx.reply('❌ Buy failed: ' + (e && typeof e === 'object' && 'message' in e ? (e as any).message : String(e)));
+      } catch (e: any) {
+        // Surface buy errors to user and terminal, and fetch logs if possible
+        let errorMsg = `❌ Buy failed: `;
+        let logs: string[] | undefined;
+        // Debug: Print error type and keys
+        console.error('Auto-buy error:', e);
+        console.error('Auto-buy error typeof:', typeof e);
+        if (e && typeof e === 'object') {
+          console.error('Auto-buy error keys:', Object.keys(e));
+          console.error('Auto-buy error constructor:', e.constructor?.name);
+        }
+        if (e && typeof e === 'object') {
+          if (e.message) errorMsg += `\n<b>Error:</b> <code>${e.message}</code>`;
+          // If it's a SendTransactionError and has getLogs, fetch logs
+          if (e.name === 'SendTransactionError' && typeof e.getLogs === 'function') {
+            try {
+              logs = await e.getLogs();
+              if (logs) errorMsg += `\n<b>Logs:</b> <pre>${Array.isArray(logs) ? logs.join('\n') : logs}</pre>`;
+            } catch (logErr: any) {
+              errorMsg += `\n<b>Log fetch error:</b> <code>${logErr && typeof logErr === 'object' && 'message' in logErr ? logErr.message : String(logErr)}</code>`;
+            }
+          }
+          // Always show transactionLogs if present
+          if (e.transactionLogs) {
+            errorMsg += `\n<b>Transaction Logs:</b> <pre>${Array.isArray(e.transactionLogs) ? e.transactionLogs.join('\n') : e.transactionLogs}</pre>`;
+          }
+          // Always show transactionMessage if present
+          if (e.transactionMessage) {
+            errorMsg += `\n<b>Transaction Message:</b> <code>${e.transactionMessage}</code>`;
+          }
+          if (e.logs) {
+            errorMsg += `\n<b>Logs:</b> <pre>${Array.isArray(e.logs) ? e.logs.join('\n') : e.logs}</pre>`;
+          }
+        } else {
+          errorMsg += `\n<b>Error:</b> <code>${e}</code>`;
+        }
+        if (logs) console.error('Transaction logs:', logs);
+        await ctx.reply(errorMsg, { parse_mode: 'HTML' });
         continue;
       }
       // --- Mark token as sent ---

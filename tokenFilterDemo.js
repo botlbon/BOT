@@ -51,7 +51,9 @@ async function main() {
     const criteria = await askCriteria();
     const res = await fetch(ENDPOINT);
     const data = await res.json();
-    let tokens = Array.isArray(data.pairs) ? data.pairs : Array.isArray(data.tokens) ? data.tokens : Array.isArray(data.boosts) ? data.boosts : Array.isArray(data.profiles) ? data.profiles : Array.isArray(data) ? data : [];
+    console.log('[DEBUG] Raw API response:', JSON.stringify(data, null, 2));
+    // إذا كانت الاستجابة مصفوفة مباشرة (كما هو الحال مع Boosts API)، استخدمها كما هي
+    let tokens = Array.isArray(data) ? data : Array.isArray(data.pairs) ? data.pairs : Array.isArray(data.tokens) ? data.tokens : Array.isArray(data.boosts) ? data.boosts : Array.isArray(data.profiles) ? data.profiles : [];
     console.log('--- Sample tokens (first 5) ---');
     printTokens(tokens.slice(0, 5));
     const filtered = filterTokens(tokens, criteria);
